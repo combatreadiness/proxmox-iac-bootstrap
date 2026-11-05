@@ -98,11 +98,11 @@ yesno() {  # yesno <title> <text>  -> exit 0 on yes
 # Asked in this order: the network first, so the gateway and the LXC address
 # can be filled in from the subnet
 KEYS=(SDN_ZONE SDN_VNET SDN_SUBNET SDN_GATEWAY CT_IP CTID CT_HOSTNAME
-      CT_STORAGE TMPL_STORAGE POOL_PREFIX SSH_PUBKEY_FILE REPO_URL)
+      CT_STORAGE TMPL_STORAGE POOL_PREFIX OP_POOLS SSH_PUBKEY_FILE REPO_URL)
 declare -A DEF=(
   [CTID]=200 [CT_HOSTNAME]=iac-mgmt [CT_IP]=10.73.10.10/24
   [SDN_ZONE]=lab [SDN_VNET]=lmgmt [SDN_SUBNET]=10.73.10.0/24 [SDN_GATEWAY]=10.73.10.1
-  [CT_STORAGE]=local-lvm [TMPL_STORAGE]=local [POOL_PREFIX]=lab
+  [CT_STORAGE]=local-lvm [TMPL_STORAGE]=local [POOL_PREFIX]=lab [OP_POOLS]=workloads
   [SSH_PUBKEY_FILE]=/root/.ssh/authorized_keys [REPO_URL]=""
 )
 declare -A LABEL=(
@@ -111,7 +111,8 @@ declare -A LABEL=(
   [SDN_VNET]="SDN vnet (8 characters max)" [SDN_SUBNET]="Management subnet"
   [SDN_GATEWAY]="Gateway (this host on that subnet; filled in from the subnet)"
   [CT_STORAGE]="Storage for the LXC disk" [TMPL_STORAGE]="Storage for templates"
-  [POOL_PREFIX]="Pool prefix" [SSH_PUBKEY_FILE]="SSH public keys to copy into the LXC"
+  [POOL_PREFIX]="Pool prefix"
+  [OP_POOLS]="Pools OpenTofu may use, space-separated (e.g. tools k8s)" [SSH_PUBKEY_FILE]="SSH public keys to copy into the LXC"
   [REPO_URL]="Git repository to clone on the LXC (empty = none)"
 )
 declare -A VAL=()

@@ -132,7 +132,7 @@ TF_ROLE="${TF_ROLE:-TerraformRole}"
 TF_SDN_ROLE="${TF_SDN_ROLE:-TerraformSDNApply}"
 TF_CLONE_ROLE="${TF_CLONE_ROLE:-TerraformClone}"
 POOL_PREFIX="${POOL_PREFIX-lab}"
-OP_POOLS="${OP_POOLS:-tools k8s targets}"
+OP_POOLS="${OP_POOLS:-workloads}"
 TEMPLATE_VMID="${TEMPLATE_VMID:-9000}"
 TEMPLATE_NAME="${TEMPLATE_NAME:-debian-12-cloud}"
 

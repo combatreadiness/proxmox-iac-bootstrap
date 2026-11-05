@@ -137,7 +137,7 @@ ROTATE_TOKEN="${ROTATE_TOKEN:-0}"
 PVE_TLS_INSECURE="${PVE_TLS_INSECURE:-1}"   # 1 = skip the API certificate check (PVE's default cert is self-signed)
 
 POOL_PREFIX="${POOL_PREFIX-lab}"            # "-" so an empty prefix is respected
-OP_POOLS="${OP_POOLS:-tools k8s targets}"   # Operational pools OpenTofu may fill
+OP_POOLS="${OP_POOLS:-workloads}"   # Operational pools OpenTofu may fill (space-separated)
 ACL_SCOPE="${ACL_SCOPE:-narrow}"            # narrow = operational pools only; root = whole datacenter
 NODE_NAME="${NODE_NAME:-$(hostname)}"
 ALLOW_EXISTING_POOL="${ALLOW_EXISTING_POOL:-0}"

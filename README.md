@@ -16,7 +16,7 @@ Proxmox VE host
 ├── SDN zone "lab"
 │   └── vnet "lmgmt" 10.73.10.0/24        host is the gateway (10.73.10.1), SNAT to the internet
 ├── Pools  lab-mgmt                       the management LXC (OpenTofu has no access here)
-│          lab-tools, lab-k8s, lab-targets  empty, for OpenTofu to fill
+│          lab-workloads                    empty, for OpenTofu to fill (OP_POOLS)
 └── LXC 200 "iac-mgmt" 10.73.10.10        Debian 12, unprivileged
     ├── OpenTofu, Ansible, git, jq
     ├── /root/.config/lab/credentials.env  API endpoint + token, mode 600
@@ -75,7 +75,7 @@ The ones you are most likely to change:
 | `CTID`, `CT_HOSTNAME`, `CT_IP` | `200`, `iac-mgmt`, `10.73.10.10/24` | The management LXC |
 | `SDN_ZONE`, `SDN_VNET`, `SDN_SUBNET`, `SDN_GATEWAY` | `lab`, `lmgmt`, `10.73.10.0/24`, `10.73.10.1` | Management network |
 | `CT_STORAGE`, `TMPL_STORAGE` | `local-lvm`, `local` | |
-| `POOL_PREFIX`, `OP_POOLS` | `lab`, `tools k8s targets` | Pool names; the API token only gets the `OP_POOLS` ones |
+| `POOL_PREFIX`, `OP_POOLS` | `lab`, `workloads` | Pool names. `OP_POOLS` is a space-separated list (`tools k8s`); the API token only gets those pools |
 | `SSH_PUBKEY_FILE` | `/root/.ssh/authorized_keys` | Keys copied into the LXC |
 | `REPO_URL`, `REPO_LINK` | empty | Clone your IaC repository on the LXC, and put one script from it on PATH |
 | `PVE_TLS_INSECURE` | `1` | See [Security](#security) |
