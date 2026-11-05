@@ -73,7 +73,8 @@ if qm status "$TEMPLATE_VMID" &>/dev/null; then
     warn "VMID ${TEMPLATE_VMID} is '${existing}', not '${TEMPLATE_NAME}' -> not listed as an image"
   fi
 else
-  warn "VM template ${TEMPLATE_VMID} not found (fine until you add VM nodes). Run: dsoadm template"
+  # Optional: only needed for VM guests. Not a problem, so no warning.
+  echo -e "  \e[1;33m–\e[0m No VM template yet (optional, for VM guests: dsoadm template)"
 fi
 
 # ---------- Build the images block (one entry per image name) ----------
