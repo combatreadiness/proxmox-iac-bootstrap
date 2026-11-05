@@ -8,11 +8,19 @@
 #   4) Remove the API user (with its tokens and ACLs) and the project's roles
 #   5) Optional: remove the management SDN subnet / vnet / zone   -> RESET_SDN=1
 #
+# Purge (PURGE=1, `dsoadm reset --purge`):
+#   Guests in the operational pools and other vnets in the zone are removed too.
+#   These pools and the zone were created here, so reset may empty them.
+#   If TEARDOWN_CMD is set (e.g. "dsoctl down --all"), it runs inside the
+#   management LXC first, with its own confirmation; reset stops if it fails
+#   or is cancelled. Whatever is left afterwards is destroyed directly.
+#
 # Run on : Proxmox host shell (as root), usually via `dsoadm reset`
 # Usage  : DRY_RUN=1 ./pve-reset.sh     (show what would be removed)
 #          ./pve-reset.sh               (asks for confirmation)
 #          RESET_SDN=1 ./pve-reset.sh   (also remove the SDN network)
 #          FORCE=1 ./pve-reset.sh       (skip the confirmation prompt)
+#          PURGE=1 ./pve-reset.sh       (also remove guests in the operational pools)
 # Keeps  : Downloaded images and templates on storage (a cache for the next init)
 # Safety : Resources not created by this project are never removed.
 # =============================================================
@@ -21,9 +29,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # ---------- Helpers ----------
-log()  { echo -e "\e[1;32m[+]\e[0m $*"; }
-warn() { echo -e "\e[1;33m[!]\e[0m $*"; }
-die()  { echo -e "\e[1;31m[x]\e[0m $*" >&2; exit 1; }
+log()  { echo -e "  \e[1;32m✔\e[0m $*"; }
+warn() { echo -e "  \e[1;33m⚠\e[0m $*"; }
+die()  { echo -e "  \e[1;31m✖\e[0m $*" >&2; exit 1; }
 
 # Read KEY=VALUE lines from a config file without executing it.
 # Variables already set (e.g. passed on the command line) take precedence.
@@ -93,7 +101,23 @@ pool_members() {
   fi
 }
 
-CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/bootstrap.env}"
+# <pool>  -> one line per guest: "<type> <vmid> <name>" (nothing if the pool does not exist)
+pool_guests() {
+  if pvesh get /pools --output-format json | json_has poolid "$1"; then
+    pvesh get "/pools/$1" --output-format json | python3 -c '
+import json, sys
+for m in json.load(sys.stdin).get("members", []):
+    if m.get("type") in ("lxc", "qemu"):
+        print(m["type"], m["vmid"], m.get("name", "-"))'
+  fi
+}
+
+if [[ -z "${CONFIG_FILE:-}" ]]; then
+  for f in /etc/proxmox-iac-bootstrap/bootstrap.env "${SCRIPT_DIR}/bootstrap.env"; do
+    if [[ -f "$f" ]]; then CONFIG_FILE="$f"; break; fi
+  done
+fi
+CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-iac-bootstrap/bootstrap.env}"
 load_config "$CONFIG_FILE"
 
 # ---------- Settings (same names as pve-host.sh / pve-template.sh) ----------
@@ -115,6 +139,8 @@ TEMPLATE_NAME="${TEMPLATE_NAME:-debian-12-cloud}"
 DRY_RUN="${DRY_RUN:-0}"
 RESET_SDN="${RESET_SDN:-0}"
 FORCE="${FORCE:-0}"
+PURGE="${PURGE:-0}"
+TEARDOWN_CMD="${TEARDOWN_CMD:-}"   # Runs inside the management LXC before a purge
 
 PROJECT_MARKER="managed-by:${PROJECT_ID}"
 MGMT_POOL="$(pool_name mgmt)"
@@ -139,24 +165,44 @@ command -v pveversion >/dev/null || die "This script must run on a Proxmox VE ho
 
 # Lab nodes live in the operational pools and are tracked by OpenTofu state on the
 # management node. Removing that node first would leave them unmanaged.
-NODES_LEFT=0
+GUESTS=()
 for p in "${OP_POOL_NAMES[@]}"; do
-  n=$(pool_members "$p")
-  if [[ "$n" != "0" ]]; then
-    warn "Pool '${p}' still has ${n} guest(s)"
-    NODES_LEFT=1
-  fi
+  while read -r g; do
+    if [[ -n "$g" ]]; then GUESTS+=("${p}: ${g}"); fi
+  done < <(pool_guests "$p")
 done
-if [[ $NODES_LEFT -eq 1 ]]; then
+if [[ ${#GUESTS[@]} -gt 0 && "$PURGE" != "1" ]]; then
+  for g in "${GUESTS[@]}"; do warn "Still in use -> ${g}"; done
   if [[ "$DRY_RUN" == "1" ]]; then
-    warn "A real reset would stop here. Destroy those guests first (e.g. tofu destroy on the management node)."
+    warn "A real reset would stop here. Destroy those guests first, or use: dsoadm reset --purge"
   else
-    die "Guests still exist in the operational pools. Destroy them first (e.g. tofu destroy on the management node)."
+    die "Guests still exist in the operational pools. Destroy them first, or use: dsoadm reset --purge"
   fi
+fi
+
+# Other vnets in the zone (made by OpenTofu); removed only with --purge --sdn
+OTHER_VNETS=()
+if [[ "$PURGE" == "1" && "$RESET_SDN" == "1" ]]; then
+  mapfile -t OTHER_VNETS < <(pvesh get /cluster/sdn/vnets --output-format json | python3 -c '
+import json, sys
+zone, skip = sys.argv[1], sys.argv[2]
+for v in json.load(sys.stdin):
+    if v.get("zone") == zone and v.get("vnet") != skip:
+        print(v["vnet"])' "$SDN_ZONE" "$SDN_VNET")
 fi
 
 echo
 echo "This will remove:"
+if [[ "$PURGE" == "1" && ${#GUESTS[@]} -gt 0 ]]; then
+  echo "  - Guests in the operational pools:"
+  for g in "${GUESTS[@]}"; do echo "      ${g}"; done
+  if [[ -n "$TEARDOWN_CMD" ]]; then
+    echo "    (first through '${TEARDOWN_CMD}' inside LXC ${CTID}, then directly)"
+  fi
+fi
+if [[ ${#OTHER_VNETS[@]} -gt 0 ]]; then
+  echo "  - Other vnets in zone ${SDN_ZONE}: ${OTHER_VNETS[*]}"
+fi
 echo "  - LXC ${CTID} (${CT_HOSTNAME})"
 echo "  - VM template ${TEMPLATE_VMID} (${TEMPLATE_NAME})"
 echo "  - Pools ${MGMT_POOL} ${OP_POOL_NAMES[*]} ${TEMPLATE_POOL} (if empty and created by this project)"
@@ -172,6 +218,42 @@ echo
 if [[ "$DRY_RUN" != "1" && "$FORCE" != "1" ]]; then
   read -r -p "Type the container hostname '${CT_HOSTNAME}' to confirm: " answer
   [[ "$answer" == "$CT_HOSTNAME" ]] || die "Confirmation did not match. Aborted."
+fi
+
+# =============================================================
+# 0b. Purge: empty the operational pools
+# =============================================================
+destroy_guest() {  # destroy_guest <lxc|qemu> <vmid> <name>
+  local tool=pct
+  if [[ "$1" == "qemu" ]]; then tool=qm; fi
+  if [[ "$2" == "$CTID" || "$2" == "$TEMPLATE_VMID" ]]; then return 0; fi   # Handled below
+  if "$tool" status "$2" 2>/dev/null | grep -q running; then
+    log "Stopping ${1} ${2} (${3})"
+    run "$tool" stop "$2"
+  fi
+  log "Destroying ${1} ${2} (${3})"
+  run "$tool" destroy "$2" --purge 1
+}
+
+if [[ "$PURGE" == "1" && ${#GUESTS[@]} -gt 0 ]]; then
+  if [[ -n "$TEARDOWN_CMD" ]]; then
+    if pct status "$CTID" 2>/dev/null | grep -q running; then
+      log "Running in LXC ${CTID}: ${TEARDOWN_CMD}"
+      if [[ "$DRY_RUN" == "1" ]]; then
+        run pct exec "$CTID" -- bash -lc "$TEARDOWN_CMD"
+      elif ! pct exec "$CTID" -- bash -lc "$TEARDOWN_CMD"; then
+        die "'${TEARDOWN_CMD}' failed or was cancelled. Nothing else was removed."
+      fi
+    else
+      warn "LXC ${CTID} is not running; skipping '${TEARDOWN_CMD}'"
+    fi
+  fi
+  # Whatever is still there (or everything, without TEARDOWN_CMD)
+  for p in "${OP_POOL_NAMES[@]}"; do
+    while read -r type vmid name; do
+      if [[ -n "$vmid" ]]; then destroy_guest "$type" "$vmid" "$name"; fi
+    done < <(pool_guests "$p")
+  done
 fi
 
 # =============================================================
@@ -265,6 +347,20 @@ else
   else
     SDN_CHANGED=0
 
+    # --purge: other vnets in the zone go first, so the zone can be removed
+    for v in "${OTHER_VNETS[@]}"; do
+      while read -r sid; do
+        if [[ -n "$sid" ]]; then
+          log "Removing SDN subnet '${sid}'"
+          run pvesh delete "/cluster/sdn/vnets/${v}/subnets/${sid}"
+        fi
+      done < <(pvesh get "/cluster/sdn/vnets/${v}/subnets" --output-format json \
+                 | python3 -c 'import json, sys; [print(d["subnet"]) for d in json.load(sys.stdin)]')
+      log "Removing SDN vnet '${v}'"
+      run pvesh delete "/cluster/sdn/vnets/${v}"
+      SDN_CHANGED=1
+    done
+
     if pvesh get /cluster/sdn/vnets --output-format json | json_has vnet "$SDN_VNET"; then
       SUBNET_ID=$(pvesh get "/cluster/sdn/vnets/${SDN_VNET}/subnets" --output-format json | subnet_id "$SDN_SUBNET")
       if [[ -n "$SUBNET_ID" ]]; then
@@ -285,8 +381,12 @@ import json, sys
 zone, skip = sys.argv[1], sys.argv[2]
 print(sum(1 for v in json.load(sys.stdin) if v.get("zone") == zone and v.get("vnet") != skip))' \
         "$SDN_ZONE" "$SDN_VNET")
-      if [[ "$REMAINING" != "0" ]]; then
-        warn "Zone '${SDN_ZONE}' still has ${REMAINING} other vnet(s) -> keeping it (destroy the OpenTofu-managed vnets first)"
+      if [[ "$REMAINING" != "0" && "$DRY_RUN" == "1" && ${#OTHER_VNETS[@]} -gt 0 ]]; then
+        log "Removing SDN zone '${SDN_ZONE}'"
+        run pvesh delete "/cluster/sdn/zones/${SDN_ZONE}"
+        SDN_CHANGED=1
+      elif [[ "$REMAINING" != "0" ]]; then
+        warn "Zone '${SDN_ZONE}' still has ${REMAINING} other vnet(s) -> keeping it (destroy them first, or use --purge)"
       else
         log "Removing SDN zone '${SDN_ZONE}'"
         run pvesh delete "/cluster/sdn/zones/${SDN_ZONE}"

@@ -21,9 +21,9 @@ export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none   # Never stop on a changelog pager
 export LC_ALL=C.UTF-8 LANG=C.UTF-8     # Always available; avoids locale warnings
 
-log()  { echo -e "\e[1;34m[mgmt]\e[0m $*"; }
-warn() { echo -e "\e[1;33m[mgmt]\e[0m $*"; }
-die()  { echo -e "\e[1;31m[mgmt]\e[0m $*" >&2; exit 1; }
+log()  { echo -e "    \e[1;34m✔\e[0m $*"; }
+warn() { echo -e "    \e[1;33m⚠\e[0m $*"; }
+die()  { echo -e "    \e[1;31m✖\e[0m $*" >&2; exit 1; }
 
 # ---------- Optional config file (KEY=VALUE lines only, never executed) ----------
 if [[ -n "${MGMT_CONFIG:-}" && -f "$MGMT_CONFIG" ]]; then

@@ -16,9 +16,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-log()  { echo -e "\e[1;32m[+]\e[0m $*"; }
-warn() { echo -e "\e[1;33m[!]\e[0m $*"; }
-die()  { echo -e "\e[1;31m[x]\e[0m $*" >&2; exit 1; }
+log()  { echo -e "  \e[1;32m✔\e[0m $*"; }
+warn() { echo -e "  \e[1;33m⚠\e[0m $*"; }
+die()  { echo -e "  \e[1;31m✖\e[0m $*" >&2; exit 1; }
 
 # Read KEY=VALUE lines without executing the file (same rules as pve-host.sh)
 load_config() {

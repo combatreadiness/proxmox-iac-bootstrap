@@ -6,7 +6,7 @@ From a fresh Proxmox VE host to a management container that can run OpenTofu and
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/combatreadiness/proxmox-iac-bootstrap/main/install.sh)"
 ```
 
-Run it as root in the Proxmox host shell. It asks a few questions (Enter keeps the default), then sets everything up. Running it again is safe.
+Run it as root in the Proxmox host shell. Pick Default or Advanced settings, confirm, and it sets everything up. Running it again is safe.
 
 ## What you get
 
@@ -38,9 +38,9 @@ The management LXC is not meant to be managed by OpenTofu. It sits in its own po
 ## What the installer does
 
 1. Checks it is on a Proxmox VE host, as root, with the commands it needs.
-2. Downloads the latest release archive and `SHA256SUMS` into a temp folder, verifies the checksum and that every file is there.
-3. Installs to `/usr/local/lib/proxmox-iac-bootstrap` and links `/usr/local/sbin/dsoadm`.
-4. Asks for the main settings and writes `/etc/proxmox-iac-bootstrap/bootstrap.env`. If that file exists, it shows it and asks whether to keep it.
+2. Asks for settings: **Default** or **Advanced** (one question per setting), then shows a summary to confirm. The answers go to `/etc/proxmox-iac-bootstrap/bootstrap.env`. If that file exists, it shows it and asks whether to keep it.
+3. Downloads the latest release archive and `SHA256SUMS` into a temp folder, verifies the checksum and that every file is there.
+4. Installs to `/usr/local/lib/proxmox-iac-bootstrap` and links `/usr/local/sbin/dsoadm`.
 5. Runs `dsoadm init`:
    - API roles, user and token
    - SDN zone, vnet, subnet (created only if missing; existing ones are checked against your settings and left alone)
@@ -104,7 +104,7 @@ Runs on the Proxmox host, as root.
 | `dsoadm init [--rotate-token] [--acl-root]` | Everything above. Safe to re-run. |
 | `dsoadm template` | Builds a Debian cloud-init VM template for OpenTofu to clone |
 | `dsoadm facts` | Writes host facts (node, storage, images) to the LXC |
-| `dsoadm reset [--dry-run] [--sdn] [-y]` | Removes what `init` and `template` created |
+| `dsoadm reset [--dry-run] [--sdn] [--purge] [-y]` | Removes what `init` and `template` created |
 | `dsoadm version` | Installed version and which config file is used |
 
 To update `dsoadm`, run the install command again. Your config is kept.
@@ -120,7 +120,18 @@ To update `dsoadm`, run the install command again. Your config is kept.
 
 Rebuild only the management LXC: `pct stop 200 && pct destroy 200`, then `dsoadm init`.
 
-`dsoadm reset` shows what it will remove and asks first. Use `--dry-run` to only look. It only touches what this project created, and stops if the OpenTofu pools still have guests in them. The SDN network stays unless you add `--sdn`.
+`dsoadm reset` shows what it will remove and asks first. Use `--dry-run` to only look. It only touches what this project created. The SDN network stays unless you add `--sdn`.
+
+If the OpenTofu pools still have guests in them, reset stops. You have two ways out:
+
+- Destroy them with your own tooling first (`tofu destroy`), then reset.
+- `dsoadm reset --purge` empties those pools for you. With `--sdn` it also removes the other vnets in the zone. The pools and the zone were created here, so reset treats what is inside them as its to clean up. The OpenTofu state on the management node goes away with it.
+
+Set `TEARDOWN_CMD` in the config to let your own tool go first. `--purge` runs it inside the management LXC, with that tool's own confirmation, and stops if it fails or you cancel. Anything still left afterwards is destroyed directly.
+
+```
+TEARDOWN_CMD=dsoctl down --all
+```
 
 ## Security
 
@@ -137,7 +148,7 @@ Rebuild only the management LXC: `pct stop 200 && pct destroy 200`, then `dsoadm
 - The OpenTofu role still includes broad privileges such as `Sys.Modify`, `User.Modify` and `Datastore.Allocate`. Trimming them needs another round of testing with real OpenTofu code.
 - `pvesh set /cluster/sdn` applies all pending SDN changes on the cluster, not only the ones made here.
 - OpenTofu is installed at whatever version the apt repository has at the time.
-- The installer asks only for the main settings; the rest go in the config file.
+- The installer asks only for the main settings (Default or Advanced); the rest go in the config file.
 - Install from a release on a fresh host has not been run end to end yet after splitting this out of a larger lab project. The scripts themselves were rebuilt from scratch twice in that project.
 
 ## License

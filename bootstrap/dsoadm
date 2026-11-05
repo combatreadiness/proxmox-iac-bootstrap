@@ -9,7 +9,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 DSO_BACKEND="${DSO_BACKEND:-proxmox}"
 
-die() { echo -e "\e[1;31m[dsoadm]\e[0m $*" >&2; exit 1; }
+die() { echo -e "  \e[1;31m✖\e[0m dsoadm: $*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
@@ -19,7 +19,8 @@ Usage:
   dsoadm init     [--rotate-token] [--acl-root]   API account, network, pools, management node
   dsoadm template                                 Cloud-init VM template for OpenTofu to clone
   dsoadm facts                                    Tell the management node about this host
-  dsoadm reset    [--dry-run] [--sdn] [-y]        Undo what init and template created
+  dsoadm reset    [--dry-run] [--sdn] [--purge] [-y]
+                                                  Undo what init and template created
   dsoadm version                                  Show the installed version and config file
 
 Options:
@@ -27,6 +28,8 @@ Options:
   --acl-root       Grant the API account the whole datacenter (debugging only)
   --dry-run        Show what reset would remove
   --sdn            Also remove the management network on reset
+  --purge          Also remove guests in the operational pools (and, with --sdn,
+                   the other vnets in the zone). Runs TEARDOWN_CMD first if set.
   -y, --yes        Do not ask for confirmation
 
 Config file (first one found):
@@ -77,6 +80,7 @@ case "$CMD" in
       case "$a" in
         --dry-run) export DRY_RUN=1 ;;
         --sdn)     export RESET_SDN=1 ;;
+        --purge)   export PURGE=1 ;;
         -y|--yes)  export FORCE=1 ;;
         *) die "Unknown option for reset: $a" ;;
       esac

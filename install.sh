@@ -6,15 +6,14 @@
 #
 # What it does, in order:
 #   1) Checks: Proxmox VE host, root, required commands
-#   2) Downloads one release archive (+ SHA256SUMS) into a temp folder
-#   3) Verifies the checksum and that all files are there
+#   2) Asks for settings (Default / Advanced) -> /etc/proxmox-iac-bootstrap/bootstrap.env
+#   3) Downloads one release archive (+ SHA256SUMS) into a temp folder and verifies it
 #   4) Installs to /usr/local/lib/proxmox-iac-bootstrap, links /usr/local/sbin/dsoadm
-#   5) Asks for settings (Enter keeps the default) -> /etc/proxmox-iac-bootstrap/bootstrap.env
-#   6) Runs `dsoadm init`
+#   5) Runs `dsoadm init`
 #
 # Environment (all optional):
 #   PIB_REF=latest|vX.Y.Z|main   What to install (default: latest release)
-#   PIB_YES=1                    Accept defaults / existing config without asking
+#   PIB_YES=1                    No questions: defaults, or the existing config
 #   PIB_NO_INIT=1                Install dsoadm only, do not run init
 #   PIB_REPO=owner/name          Install from a fork
 # Re-run  : Safe. Replaces the installed files; keeps your config.
@@ -36,94 +35,200 @@ REQUIRED_FILES=(
   bootstrap/pve-facts.sh bootstrap/pve-template.sh bootstrap/pve-reset.sh
   bootstrap/bootstrap.env.example
 )
+TITLE="Proxmox IaC Bootstrap"
 
-STEP=0
-step() { STEP=$((STEP + 1)); echo -e "\n\e[1;36m[${STEP}]\e[0m \e[1m$*\e[0m"; }
-ok()   { echo -e "    \e[1;32mok\e[0m   $*"; }
-skip() { echo -e "    \e[1;33mskip\e[0m $*"; }
-die()  { echo -e "    \e[1;31mfail\e[0m $*" >&2; exit 1; }
+# ---------- Output ----------
+GN=$'\e[1;32m'; YW=$'\e[1;33m'; RD=$'\e[1;31m'; BL=$'\e[1;36m'; DIM=$'\e[2m'; CL=$'\e[0m'
+msg_info() { printf '  %s…%s %s' "$YW" "$CL" "$1"; }
+msg_ok()   { printf '\r\e[K  %s✔%s %s\n' "$GN" "$CL" "$1"; }
+msg_skip() { printf '\r\e[K  %s–%s %s\n' "$YW" "$CL" "$1"; }
+msg_err()  { printf '\r\e[K  %s✖%s %s\n' "$RD" "$CL" "$1" >&2; exit 1; }
+
+header() {
+  clear 2>/dev/null || true
+  cat <<EOF
+${BL}
+   ┌─────────────────────────────────────────────┐
+   │   Proxmox IaC Bootstrap                     │
+   │   SDN · management LXC · OpenTofu · Ansible │
+   └─────────────────────────────────────────────┘
+${CL}
+EOF
+}
 
 TMP=""
 cleanup() { if [[ -n "$TMP" && -d "$TMP" ]]; then rm -rf "$TMP"; fi; }
 trap cleanup EXIT
 
-# Read a line from the terminal even when stdin is a pipe (curl ... | bash)
 HAVE_TTY=0
 if { : </dev/tty; } 2>/dev/null; then HAVE_TTY=1; fi
-ask() {  # ask <prompt> <default>  -> prints the answer
+INTERACTIVE=0
+if [[ "$PIB_YES" != "1" && $HAVE_TTY -eq 1 ]]; then INTERACTIVE=1; fi
+USE_WT=0
+if [[ $INTERACTIVE -eq 1 ]] && command -v whiptail >/dev/null; then USE_WT=1; fi
+
+# ---------- Questions (whiptail when available, plain prompts otherwise) ----------
+wt() { whiptail --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3 </dev/tty; }
+
+ask() {  # ask <label> <default>
   local answer=""
-  if [[ "$PIB_YES" == "1" || $HAVE_TTY -eq 0 ]]; then echo "$2"; return; fi
-  read -r -p "    $1 [$2]: " answer </dev/tty || true
-  echo "${answer:-$2}"
-}
-confirm() {  # confirm <prompt>  -> exit 0 on yes (default yes)
-  local answer=""
-  if [[ "$PIB_YES" == "1" ]]; then return 0; fi
-  [[ $HAVE_TTY -eq 1 ]] || die "No terminal to ask on. Re-run with PIB_YES=1."
-  read -r -p "    $1 [Y/n]: " answer </dev/tty || true
-  [[ -z "$answer" || "$answer" =~ ^[Yy] ]]
+  if [[ $USE_WT -eq 1 ]]; then
+    answer=$(wt --title "Advanced settings" --inputbox "$1" 9 64 "$2") || return 1
+  else
+    read -r -p "    $1 [$2]: " answer </dev/tty || true
+    answer="${answer:-$2}"
+  fi
+  printf '%s' "$answer"
 }
 
+yesno() {  # yesno <title> <text>  -> exit 0 on yes
+  local answer=""
+  if [[ $USE_WT -eq 1 ]]; then
+    whiptail --backtitle "$TITLE" --title "$1" --yesno "$2" 22 72 </dev/tty
+  else
+    echo "$2" | sed 's/^/    /'
+    read -r -p "    $1 [Y/n]: " answer </dev/tty || true
+    [[ -z "$answer" || "$answer" =~ ^[Yy] ]]
+  fi
+}
+
+# ---------- Settings: names, defaults, labels ----------
+KEYS=(CTID CT_HOSTNAME CT_IP SDN_ZONE SDN_VNET SDN_SUBNET SDN_GATEWAY
+      CT_STORAGE TMPL_STORAGE POOL_PREFIX SSH_PUBKEY_FILE REPO_URL)
+declare -A DEF=(
+  [CTID]=200 [CT_HOSTNAME]=iac-mgmt [CT_IP]=10.73.10.10/24
+  [SDN_ZONE]=lab [SDN_VNET]=lmgmt [SDN_SUBNET]=10.73.10.0/24 [SDN_GATEWAY]=10.73.10.1
+  [CT_STORAGE]=local-lvm [TMPL_STORAGE]=local [POOL_PREFIX]=lab
+  [SSH_PUBKEY_FILE]=/root/.ssh/authorized_keys [REPO_URL]=""
+)
+declare -A LABEL=(
+  [CTID]="Management LXC ID" [CT_HOSTNAME]="Management LXC hostname"
+  [CT_IP]="Management LXC IP/CIDR (or dhcp)" [SDN_ZONE]="SDN zone"
+  [SDN_VNET]="SDN vnet (8 characters max)" [SDN_SUBNET]="Management subnet"
+  [SDN_GATEWAY]="Gateway (this host's address on that subnet)"
+  [CT_STORAGE]="Storage for the LXC disk" [TMPL_STORAGE]="Storage for templates"
+  [POOL_PREFIX]="Pool prefix" [SSH_PUBKEY_FILE]="SSH public keys to copy into the LXC"
+  [REPO_URL]="Git repository to clone on the LXC (empty = none)"
+)
+declare -A VAL=()
+
+summary() {
+  local k
+  for k in "${KEYS[@]}"; do printf '%-16s %s\n' "$k" "${VAL[$k]:-(empty)}"; done
+}
+
+header
+
 # =============================================================
-step "Checking this host"
+echo "${DIM}  Host${CL}"
 # =============================================================
-[[ $EUID -eq 0 ]] || die "Run as root."
-command -v pveversion >/dev/null || die "This is not a Proxmox VE host (pveversion not found)."
-ok "$(pveversion)"
+[[ $EUID -eq 0 ]] || msg_err "Run as root."
+command -v pveversion >/dev/null || msg_err "This is not a Proxmox VE host (pveversion not found)."
+msg_ok "$(pveversion)"
 for c in curl tar gzip sha256sum python3 pvesh pveum pct pveam; do
-  command -v "$c" >/dev/null || die "Missing command: $c"
+  command -v "$c" >/dev/null || msg_err "Missing command: $c"
 done
-ok "required commands present"
-[[ "$PIB_REPO" != *"<OWNER>"* ]] || die "PIB_REPO is not set (this copy of install.sh still has the <OWNER> placeholder)."
+msg_ok "Required commands present"
+[[ "$PIB_REPO" != *"<OWNER>"* ]] || msg_err "PIB_REPO is not set (this copy of install.sh still has the <OWNER> placeholder)."
 
 # =============================================================
-step "Downloading ${PIB_REPO} (${PIB_REF})"
+echo; echo "${DIM}  Settings${CL}"
+# =============================================================
+install -d -m 700 "$ETC_DIR"
+if [[ -f "$CONFIG" ]]; then
+  current=$(grep -Ev '^[[:space:]]*(#|$)' "$CONFIG" || true)
+  if [[ $INTERACTIVE -eq 1 ]]; then
+    yesno "Existing settings" "Found ${CONFIG}:
+
+${current}
+
+Use these settings?" || msg_err "Edit ${CONFIG}, then run: dsoadm init"
+  fi
+  msg_ok "Using ${CONFIG}"
+else
+  for k in "${KEYS[@]}"; do VAL[$k]="${DEF[$k]}"; done
+  if [[ $INTERACTIVE -eq 1 ]]; then
+    mode="default"
+    if [[ $USE_WT -eq 1 ]]; then
+      mode=$(wt --title "Settings" --menu "How do you want to set this up?" 12 64 2 \
+        default "Default settings" advanced "Advanced settings") || msg_err "Cancelled."
+    else
+      read -r -p "    Use default settings? [Y/n]: " a </dev/tty || true
+      if [[ -n "$a" && ! "$a" =~ ^[Yy] ]]; then mode="advanced"; fi
+    fi
+    if [[ "$mode" == "advanced" ]]; then
+      for k in "${KEYS[@]}"; do
+        v=$(ask "${LABEL[$k]}" "${VAL[$k]}") || msg_err "Cancelled. Nothing was changed."
+        VAL[$k]="$v"
+      done
+    fi
+    yesno "Ready" "These settings will be used:
+
+$(summary)
+
+Continue?" || msg_err "Cancelled. Nothing was changed."
+  fi
+  umask 077
+  {
+    echo "# Written by install.sh on $(date -u +%Y-%m-%dT%H:%MZ)."
+    echo "# All keys and defaults: ${LIB_DIR}/bootstrap/bootstrap.env.example"
+    for k in "${KEYS[@]}"; do echo "${k}=${VAL[$k]}"; done
+  } > "$CONFIG"
+  msg_ok "Wrote ${CONFIG}"
+fi
+
+# =============================================================
+echo; echo "${DIM}  Download${CL}"
 # =============================================================
 TMP="$(mktemp -d)"
 cd "$TMP"
 
 fetch() {  # fetch <url> <file>
   curl -fsSL --proto '=https' --retry 3 --retry-delay 2 -o "$2" "$1" \
-    || die "Download failed: $1"
+    || msg_err "Download failed: $1"
 }
 
+msg_info "Finding release"
 if [[ "$PIB_REF" == "latest" ]]; then
   url=$(curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' \
         "https://github.com/${PIB_REPO}/releases/latest") \
-    || die "Cannot reach GitHub to find the latest release."
+    || msg_err "Cannot reach GitHub to find the latest release."
   TAG="${url##*/}"
-  [[ "$TAG" == v* ]] || die "No release found for ${PIB_REPO}. Use PIB_REF=main to install from the branch."
+  [[ "$TAG" == v* ]] || msg_err "No release found for ${PIB_REPO}. Use PIB_REF=main to install from the branch."
 else
   TAG="$PIB_REF"
 fi
+msg_ok "${PIB_REPO} ${TAG}"
 
 if [[ "$TAG" == v* ]]; then
   ARCHIVE="${NAME}-${TAG}.tar.gz"
   base="https://github.com/${PIB_REPO}/releases/download/${TAG}"
+  msg_info "Downloading ${ARCHIVE}"
   fetch "${base}/${ARCHIVE}" "$ARCHIVE"
   fetch "${base}/SHA256SUMS" SHA256SUMS
-  ok "release ${TAG}"
+  msg_ok "Downloaded ${ARCHIVE}"
   line=$(grep -E "  ${ARCHIVE}\$" SHA256SUMS || true)
-  [[ -n "$line" ]] || die "${ARCHIVE} is not listed in SHA256SUMS."
-  echo "$line" | sha256sum -c --quiet - || die "Checksum mismatch for ${ARCHIVE}."
-  ok "sha256 verified"
+  [[ -n "$line" ]] || msg_err "${ARCHIVE} is not listed in SHA256SUMS."
+  echo "$line" | sha256sum -c --quiet - >/dev/null 2>&1 || msg_err "Checksum mismatch for ${ARCHIVE}."
+  msg_ok "SHA256 verified"
 else
   # Branch or commit: no published checksum. Meant for testing.
   ARCHIVE="${NAME}-src.tar.gz"
+  msg_info "Downloading ${TAG}"
   fetch "https://github.com/${PIB_REPO}/archive/${TAG}.tar.gz" "$ARCHIVE"
-  skip "no checksum for a branch build (${TAG}); use a release for normal installs"
+  msg_skip "No checksum for a branch build (${TAG}); use a release for normal installs"
 fi
 
 mkdir src
-tar -xzf "$ARCHIVE" -C src --strip-components=1 || die "Cannot extract ${ARCHIVE}."
+tar -xzf "$ARCHIVE" -C src --strip-components=1 || msg_err "Cannot extract ${ARCHIVE}."
 for f in "${REQUIRED_FILES[@]}"; do
-  [[ -f "src/$f" ]] || die "Archive is missing ${f}."
+  [[ -f "src/$f" ]] || msg_err "Archive is missing ${f}."
 done
 [[ -f src/VERSION ]] || echo "${TAG}" > src/VERSION
-ok "all files present ($(cat src/VERSION))"
+msg_ok "All files present"
 
 # =============================================================
-step "Installing dsoadm"
+echo; echo "${DIM}  Install${CL}"
 # =============================================================
 chmod 755 src/bootstrap/dsoadm src/bootstrap/*.sh
 rm -rf "${LIB_DIR}.new"
@@ -137,57 +242,18 @@ fi
 mv "${LIB_DIR}.new" "$LIB_DIR"
 rm -rf "${LIB_DIR}.old"
 ln -sfn "${LIB_DIR}/bootstrap/dsoadm" "$BIN_LINK"
-ok "${LIB_DIR}"
-ok "${BIN_LINK} -> ${LIB_DIR}/bootstrap/dsoadm"
+msg_ok "Installed ${LIB_DIR}"
+msg_ok "Linked ${BIN_LINK}"
 
 # =============================================================
-step "Settings"
-# =============================================================
-install -d -m 700 "$ETC_DIR"
-# The answers below are written out through ${!k}, which ShellCheck cannot follow
-# shellcheck disable=SC2034
-if [[ -f "$CONFIG" ]]; then
-  echo "    Existing config: ${CONFIG}"
-  grep -Ev '^[[:space:]]*(#|$)' "$CONFIG" | sed 's/^/      /' || true
-  if confirm "Use this config?"; then
-    ok "keeping ${CONFIG}"
-  else
-    die "Edit ${CONFIG} and run: dsoadm init"
-  fi
-else
-  echo "    Press Enter to keep a default."
-  CTID=$(ask "Management LXC ID" 200)
-  CT_HOSTNAME=$(ask "Management LXC hostname" iac-mgmt)
-  SDN_ZONE=$(ask "SDN zone" lab)
-  SDN_VNET=$(ask "SDN vnet (max 8 chars)" lmgmt)
-  SDN_SUBNET=$(ask "Management subnet" 10.73.10.0/24)
-  SDN_GATEWAY=$(ask "Gateway (this host on that subnet)" 10.73.10.1)
-  CT_IP=$(ask "Management LXC IP/CIDR" 10.73.10.10/24)
-  CT_STORAGE=$(ask "Storage for the LXC disk" local-lvm)
-  TMPL_STORAGE=$(ask "Storage for templates" local)
-  POOL_PREFIX=$(ask "Pool prefix" lab)
-  SSH_PUBKEY_FILE=$(ask "SSH public keys to put in the LXC" /root/.ssh/authorized_keys)
-  REPO_URL=$(ask "Git repository to clone on the LXC (empty = none)" "")
-  umask 077
-  {
-    echo "# Written by install.sh on $(date -u +%Y-%m-%dT%H:%MZ)."
-    echo "# All keys and defaults: ${LIB_DIR}/bootstrap/bootstrap.env.example"
-    for k in CTID CT_HOSTNAME SDN_ZONE SDN_VNET SDN_SUBNET SDN_GATEWAY CT_IP \
-             CT_STORAGE TMPL_STORAGE POOL_PREFIX SSH_PUBKEY_FILE REPO_URL; do
-      echo "${k}=${!k}"
-    done
-  } > "$CONFIG"
-  ok "wrote ${CONFIG}"
-fi
-
-# =============================================================
-step "Running dsoadm init"
+echo; echo "${DIM}  dsoadm init${CL}"
 # =============================================================
 if [[ "$PIB_NO_INIT" == "1" ]]; then
-  skip "PIB_NO_INIT=1. Run it yourself: dsoadm init"
+  msg_skip "Skipped (PIB_NO_INIT=1). Run it yourself: dsoadm init"
   exit 0
 fi
 cd /
-"$BIN_LINK" init || die "dsoadm init failed. Fix the error above and run: dsoadm init"
+"$BIN_LINK" init || msg_err "dsoadm init failed. Fix the error above and run: dsoadm init"
 
-echo -e "\n\e[1;32mDone.\e[0m Next time, use: dsoadm help"
+echo
+echo "  ${GN}Done.${CL} Manage it later with: ${BL}dsoadm help${CL}"
