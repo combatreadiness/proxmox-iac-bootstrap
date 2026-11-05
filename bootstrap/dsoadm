@@ -60,8 +60,13 @@ case "$CMD" in
         *) die "Unknown option for init: $a" ;;
       esac
     done
+    DSO_SUMMARY_FILE="$(mktemp)"; export DSO_SUMMARY_FILE
+    trap 'rm -f "$DSO_SUMMARY_FILE"' EXIT
     "${DIR}/pve-host.sh"
-    exec "${DIR}/pve-facts.sh"
+    rc=0
+    "${DIR}/pve-facts.sh" || rc=$?
+    cat "$DSO_SUMMARY_FILE"
+    exit "$rc"
     ;;
   template)
     need_root template

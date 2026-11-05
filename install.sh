@@ -16,6 +16,7 @@
 #   PIB_YES=1                    No questions: defaults, or the existing config
 #   PIB_NO_INIT=1                Install dsoadm only, do not run init
 #   PIB_REPO=owner/name          Install from a fork
+#   PIB_SRC=/path/to/checkout    Install from a local folder instead of GitHub (development)
 # Re-run  : Safe. Replaces the installed files; keeps your config.
 # =============================================================
 set -euo pipefail
@@ -24,6 +25,7 @@ PIB_REPO="${PIB_REPO:-combatreadiness/proxmox-iac-bootstrap}"
 PIB_REF="${PIB_REF:-latest}"
 PIB_YES="${PIB_YES:-0}"
 PIB_NO_INIT="${PIB_NO_INIT:-0}"
+PIB_SRC="${PIB_SRC:-}"
 
 NAME="proxmox-iac-bootstrap"
 LIB_DIR="/usr/local/lib/${NAME}"
@@ -234,6 +236,18 @@ fetch() {  # fetch <url> <file>
     || msg_err "Download failed: $1"
 }
 
+if [[ -n "$PIB_SRC" ]]; then
+  # Local checkout: no download, no checksum
+  [[ -d "$PIB_SRC" ]] || msg_err "PIB_SRC is not a folder: ${PIB_SRC}"
+  mkdir src
+  (cd "$PIB_SRC" && tar --exclude=.git -cf - .) | tar -xf - -C src
+  TAG="local"
+  if command -v git >/dev/null && git -C "$PIB_SRC" rev-parse --short HEAD >/dev/null 2>&1; then
+    TAG="local-$(git -C "$PIB_SRC" rev-parse --short HEAD)"
+  fi
+  echo "$TAG" > src/VERSION
+  msg_skip "Using local folder ${PIB_SRC} (${TAG}), no checksum"
+else
 msg_info "Finding release"
 if [[ "$PIB_REF" == "latest" ]]; then
   url=$(curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' \
@@ -267,6 +281,7 @@ fi
 
 mkdir src
 tar -xzf "$ARCHIVE" -C src --strip-components=1 || msg_err "Cannot extract ${ARCHIVE}."
+fi
 for f in "${REQUIRED_FILES[@]}"; do
   [[ -f "src/$f" ]] || msg_err "Archive is missing ${f}."
 done

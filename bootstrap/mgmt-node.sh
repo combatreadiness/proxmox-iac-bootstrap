@@ -24,6 +24,8 @@ export LC_ALL=C.UTF-8 LANG=C.UTF-8     # Always available; avoids locale warning
 log()  { echo -e "    \e[1;34m✔\e[0m $*"; }
 warn() { echo -e "    \e[1;33m⚠\e[0m $*"; }
 die()  { echo -e "    \e[1;31m✖\e[0m $*" >&2; exit 1; }
+# Show a command's own output, indented and dimmed, so long steps visibly move
+indent() { sed -u $'s/^/        \e[2m/; s/$/\e[0m/'; }
 
 # ---------- Optional config file (KEY=VALUE lines only, never executed) ----------
 if [[ -n "${MGMT_CONFIG:-}" && -f "$MGMT_CONFIG" ]]; then
@@ -67,18 +69,18 @@ log "OS: ${PRETTY_NAME:-$ID}"
 # ---------- 1. Base tools ----------
 PKGS=(git curl ca-certificates gnupg unzip jq python3 openssh-client)
 if [[ "$INSTALL_ANSIBLE" == "1" ]]; then PKGS+=(ansible); fi
-log "Installing packages: ${PKGS[*]}"
-"${SUDO[@]}" apt-get update -qq
-"${SUDO[@]}" apt-get install -y -qq "${PKGS[@]}" >/dev/null
+log "Installing packages: ${PKGS[*]} (a few minutes on a fresh container)"
+"${SUDO[@]}" apt-get update -q 2>&1 | indent
+"${SUDO[@]}" apt-get install -y -q "${PKGS[@]}" 2>&1 | indent
 
 # ---------- 1b. Locale ----------
 # SSH clients forward LANG (e.g. en_US.UTF-8); Ansible fails if it is not installed.
 LOCALE_WANT="${LOCALE_WANT:-en_US.UTF-8}"
 if ! locale -a 2>/dev/null | grep -qix "${LOCALE_WANT/UTF-8/utf8}"; then
   log "Generating locale ${LOCALE_WANT}"
-  "${SUDO[@]}" apt-get install -y -qq locales >/dev/null
+  "${SUDO[@]}" apt-get install -y -q locales 2>&1 | indent
   "${SUDO[@]}" sed -i "s/^# *\(${LOCALE_WANT} UTF-8\)/\1/" /etc/locale.gen
-  "${SUDO[@]}" locale-gen >/dev/null
+  "${SUDO[@]}" locale-gen 2>&1 | indent
   "${SUDO[@]}" update-locale LANG="$LOCALE_WANT"
 fi
 
@@ -93,7 +95,7 @@ else
   INSTALLER="$(mktemp)"
   curl --proto '=https' --tlsv1.2 -fsSL https://get.opentofu.org/install-opentofu.sh -o "$INSTALLER"
   chmod +x "$INSTALLER"
-  "${SUDO[@]}" "$INSTALLER" --install-method deb >/dev/null
+  "${SUDO[@]}" "$INSTALLER" --install-method deb 2>&1 | indent
   rm -f "$INSTALLER"
 fi
 
@@ -182,7 +184,6 @@ if [[ -n "$REPO_LINK" ]]; then
   fi
 fi
 
-log "Done. Installed:"
-if command -v tofu    >/dev/null; then echo "  $(tofu version | head -n1)"; fi
-if command -v ansible >/dev/null; then echo "  $(ansible --version | head -n1)"; fi
-echo "  $(git --version)"
+if command -v tofu    >/dev/null; then log "$(tofu version | head -n1)"; fi
+if command -v ansible >/dev/null; then log "$(ansible --version | head -n1)"; fi
+log "$(git --version)"

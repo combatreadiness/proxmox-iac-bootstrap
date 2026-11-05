@@ -149,7 +149,6 @@ TEARDOWN_CMD=dsoctl down --all
 - `pvesh set /cluster/sdn` applies all pending SDN changes on the cluster, not only the ones made here.
 - OpenTofu is installed at whatever version the apt repository has at the time.
 - The installer asks only for the main settings (Default or Advanced); the rest go in the config file.
-- Install from a release on a fresh host has not been run end to end yet after splitting this out of a larger lab project. The scripts themselves were rebuilt from scratch twice in that project.
 
 ## License
 

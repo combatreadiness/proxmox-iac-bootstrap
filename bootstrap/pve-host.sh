@@ -25,6 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log()  { echo -e "  \e[1;32m✔\e[0m $*"; }
 warn() { echo -e "  \e[1;33m⚠\e[0m $*"; }
 die()  { echo -e "  \e[1;31m✖\e[0m $*" >&2; exit 1; }
+# Show a command's own output, indented and dimmed
+indent() { sed -u $'s/^/      \e[2m/; s/$/\e[0m/'; }
 
 # Read KEY=VALUE lines from a config file without executing it.
 # Variables already set (e.g. passed on the command line) take precedence.
@@ -301,7 +303,7 @@ fi
 
 if [[ $SDN_CHANGED -eq 1 ]]; then
   log "Applying SDN configuration"
-  pvesh set /cluster/sdn
+  pvesh set /cluster/sdn 2>&1 | indent
 fi
 
 for _ in $(seq 1 15); do
@@ -398,7 +400,7 @@ else
   )
   [[ -n "$TEMPLATE" ]] || die "No debian-${DEBIAN_VERSION} template found."
   log "Downloading template: ${TEMPLATE}"
-  pveam download "$TMPL_STORAGE" "$TEMPLATE"
+  pveam download "$TMPL_STORAGE" "$TEMPLATE" 2>&1 | indent
 fi
 
 # =============================================================
@@ -437,7 +439,7 @@ else
     --description "$CT_DESCRIPTION"
   )
   log "Creating LXC ${CTID} (${CT_HOSTNAME}) on ${BRIDGE} (${CT_IP})"
-  pct create "$CTID" "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" "${CREATE_ARGS[@]}"
+  pct create "$CTID" "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" "${CREATE_ARGS[@]}" 2>&1 | indent
 fi
 
 if ! pct status "$CTID" | grep -q running; then
@@ -516,6 +518,7 @@ if [[ "$SET_TAG_COLORS" == "1" ]]; then
   pvesh set /cluster/options --tag-style "color-map=mgmt:1565C0:FFFFFF;bootstrap:546E7A:FFFFFF"
 fi
 
+summary_box() {
 cat <<EOF
 
 ────────────────────────────────────────────
@@ -537,3 +540,6 @@ cat <<EOF
  Then: ssh ${CT_HOSTNAME}
 ────────────────────────────────────────────
 EOF
+}
+# dsoadm prints this after the facts step, so it is the last thing on screen
+if [[ -n "${DSO_SUMMARY_FILE:-}" ]]; then summary_box > "$DSO_SUMMARY_FILE"; else summary_box; fi
