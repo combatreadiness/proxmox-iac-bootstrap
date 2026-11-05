@@ -1,0 +1,20 @@
+# Local settings and secrets
+bootstrap.env
+*.env
+!*.env.example
+credentials*
+*token*
+*.pem
+*.key
+id_*
+
+# Build output
+dist/
+stage/
+VERSION
+
+# Editors / OS
+*.swp
+.DS_Store
+.vscode/
+.idea/

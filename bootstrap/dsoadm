@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# =============================================================
+# dsoadm — host-side CLI for proxmox-iac-bootstrap
+# Runs on the Proxmox host as root.
+# Thin wrapper around the pve-*.sh scripts in the same folder.
+# =============================================================
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+DSO_BACKEND="${DSO_BACKEND:-proxmox}"
+
+die() { echo -e "\e[1;31m[dsoadm]\e[0m $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+dsoadm — Proxmox IaC bootstrap (host side)
+
+Usage:
+  dsoadm init     [--rotate-token] [--acl-root]   API account, network, pools, management node
+  dsoadm template                                 Cloud-init VM template for OpenTofu to clone
+  dsoadm facts                                    Tell the management node about this host
+  dsoadm reset    [--dry-run] [--sdn] [-y]        Undo what init and template created
+  dsoadm version                                  Show the installed version and config file
+
+Options:
+  --rotate-token   Reissue the API token (e.g. when the credentials file was lost)
+  --acl-root       Grant the API account the whole datacenter (debugging only)
+  --dry-run        Show what reset would remove
+  --sdn            Also remove the management network on reset
+  -y, --yes        Do not ask for confirmation
+
+Config file (first one found):
+  $CONFIG_FILE, /etc/proxmox-iac-bootstrap/bootstrap.env, <install dir>/bootstrap/bootstrap.env
+USAGE
+}
+
+# First config file found wins; exported so every pve-*.sh reads the same one
+if [[ -z "${CONFIG_FILE:-}" ]]; then
+  for f in /etc/proxmox-iac-bootstrap/bootstrap.env "${DIR}/bootstrap.env"; do
+    if [[ -f "$f" ]]; then CONFIG_FILE="$f"; break; fi
+  done
+fi
+export CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-iac-bootstrap/bootstrap.env}"
+
+[[ "$DSO_BACKEND" == "proxmox" ]] || die "Unsupported backend '${DSO_BACKEND}'"
+
+need_root() { [[ $EUID -eq 0 ]] || die "'dsoadm $1' must run as root on the Proxmox host."; }
+
+CMD="${1:-help}"; shift || true
+case "$CMD" in
+  init)
+    need_root init
+    for a in "$@"; do
+      case "$a" in
+        --rotate-token) export ROTATE_TOKEN=1 ;;
+        --acl-root)     export ACL_SCOPE=root ;;
+        *) die "Unknown option for init: $a" ;;
+      esac
+    done
+    "${DIR}/pve-host.sh"
+    exec "${DIR}/pve-facts.sh"
+    ;;
+  template)
+    need_root template
+    [[ $# -eq 0 ]] || die "template takes no options"
+    "${DIR}/pve-template.sh"
+    exec "${DIR}/pve-facts.sh"
+    ;;
+  facts)
+    need_root facts
+    [[ $# -eq 0 ]] || die "facts takes no options"
+    exec "${DIR}/pve-facts.sh"
+    ;;
+  reset)
+    need_root reset
+    for a in "$@"; do
+      case "$a" in
+        --dry-run) export DRY_RUN=1 ;;
+        --sdn)     export RESET_SDN=1 ;;
+        -y|--yes)  export FORCE=1 ;;
+        *) die "Unknown option for reset: $a" ;;
+      esac
+    done
+    exec "${DIR}/pve-reset.sh"
+    ;;
+  version|--version)
+    if [[ -f "${DIR}/../VERSION" ]]; then
+      echo "dsoadm $(cat "${DIR}/../VERSION")"
+    else
+      echo "dsoadm (source checkout, no VERSION file)"
+    fi
+    if [[ -f "$CONFIG_FILE" ]]; then echo "config: ${CONFIG_FILE}"; else echo "config: none (defaults)"; fi
+    ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; echo >&2; die "Unknown command: ${CMD}" ;;
+esac
