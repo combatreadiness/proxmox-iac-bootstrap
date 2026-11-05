@@ -161,7 +161,8 @@ edit_settings() {  # one input box per setting, prefilled with the current value
 # Write KEYS into the config; other lines (comments, TEARDOWN_CMD, ...) are kept
 save_settings() {
   local tmp k done_keys=" "
-  umask 077
+  # mktemp makes the file 0600. No umask change here: it would leak into
+  # `dsoadm init`, and pct cannot create unprivileged containers under umask 077.
   tmp="$(mktemp "${ETC_DIR}/.bootstrap.env.XXXXXX")"
   if [[ -f "$CONFIG" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -181,6 +182,7 @@ save_settings() {
   for k in "${KEYS[@]}"; do
     if [[ "$done_keys" != *" ${k} "* ]]; then echo "${k}=${VAL[$k]}" >> "$tmp"; fi
   done
+  chmod 600 "$tmp"
   mv "$tmp" "$CONFIG"
 }
 

@@ -19,6 +19,9 @@
 # Re-run : Safe; existing resources are skipped.
 # =============================================================
 set -euo pipefail
+# A restrictive umask (e.g. 077) makes `pct create` fail for unprivileged
+# containers: the container's root cannot enter its own rootfs folder.
+umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------- Helpers ----------
