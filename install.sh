@@ -95,7 +95,9 @@ yesno() {  # yesno <title> <text>  -> exit 0 on yes
 }
 
 # ---------- Settings: names, defaults, labels ----------
-KEYS=(CTID CT_HOSTNAME CT_IP SDN_ZONE SDN_VNET SDN_SUBNET SDN_GATEWAY
+# Asked in this order: the network first, so the gateway and the LXC address
+# can be filled in from the subnet
+KEYS=(SDN_ZONE SDN_VNET SDN_SUBNET SDN_GATEWAY CT_IP CTID CT_HOSTNAME
       CT_STORAGE TMPL_STORAGE POOL_PREFIX SSH_PUBKEY_FILE REPO_URL)
 declare -A DEF=(
   [CTID]=200 [CT_HOSTNAME]=iac-mgmt [CT_IP]=10.73.10.10/24
@@ -105,9 +107,9 @@ declare -A DEF=(
 )
 declare -A LABEL=(
   [CTID]="Management LXC ID" [CT_HOSTNAME]="Management LXC hostname"
-  [CT_IP]="Management LXC IP/CIDR (or dhcp)" [SDN_ZONE]="SDN zone"
+  [CT_IP]="Management LXC IP/CIDR (filled in from the subnet)" [SDN_ZONE]="SDN zone"
   [SDN_VNET]="SDN vnet (8 characters max)" [SDN_SUBNET]="Management subnet"
-  [SDN_GATEWAY]="Gateway (this host's address on that subnet)"
+  [SDN_GATEWAY]="Gateway (this host on that subnet; filled in from the subnet)"
   [CT_STORAGE]="Storage for the LXC disk" [TMPL_STORAGE]="Storage for templates"
   [POOL_PREFIX]="Pool prefix" [SSH_PUBKEY_FILE]="SSH public keys to copy into the LXC"
   [REPO_URL]="Git repository to clone on the LXC (empty = none)"
@@ -150,10 +152,34 @@ if [[ -f "$CONFIG" ]]; then
   done < <(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$CONFIG")
 fi
 
+# net_addr <cidr> <n>  -> host number n in that subnet ("" if the subnet is invalid)
+#   net_addr 10.70.10.0/24 1  -> 10.70.10.1      net_addr 10.70.10.0/24 10/ -> 10.70.10.10/24
+net_addr() {
+  python3 -c '
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    sys.exit(0)
+n, with_prefix = sys.argv[2].rstrip("/"), sys.argv[2].endswith("/")
+addr = net.network_address + int(n)
+print(f"{addr}/{net.prefixlen}" if with_prefix else addr)' "$1" "$2"
+}
+
 edit_settings() {  # one input box per setting, prefilled with the current value
-  local k v
+  local k v old_gw old_ip
   for k in "${KEYS[@]}"; do
-    v=$(ask "${LABEL[$k]}" "${VAL[$k]}") || msg_err "Cancelled. Nothing was changed."
+    while :; do
+      v=$(ask "${LABEL[$k]}" "${VAL[$k]}") || msg_err "Cancelled. Nothing was changed."
+      if [[ "$k" != "SDN_SUBNET" || -n "$(net_addr "$v" 1)" ]]; then break; fi
+      echo "    Not a subnet: ${v} (example: 10.70.10.0/24)"
+    done
+    if [[ "$k" == "SDN_SUBNET" && "$v" != "${VAL[SDN_SUBNET]}" ]]; then
+      # Gateway and LXC address follow the subnet unless they were set by hand
+      old_gw=$(net_addr "${VAL[SDN_SUBNET]}" 1); old_ip=$(net_addr "${VAL[SDN_SUBNET]}" 10/)
+      if [[ "${VAL[SDN_GATEWAY]}" == "$old_gw" ]]; then VAL[SDN_GATEWAY]=$(net_addr "$v" 1); fi
+      if [[ "${VAL[CT_IP]}" == "$old_ip" ]]; then VAL[CT_IP]=$(net_addr "$v" 10/); fi
+    fi
     VAL[$k]="$v"
   done
 }

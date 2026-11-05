@@ -203,11 +203,27 @@ fi
 if [[ ${#OTHER_VNETS[@]} -gt 0 ]]; then
   echo "  - Other vnets in zone ${SDN_ZONE}: ${OTHER_VNETS[*]}"
 fi
+# The VM template (dsoadm template) is optional: mention it only when it is there
+HAS_TEMPLATE=0
+if qm status "$TEMPLATE_VMID" &>/dev/null \
+   && [[ "$(qm config "$TEMPLATE_VMID" | awk '/^name:/ {print $2}')" == "$TEMPLATE_NAME" ]]; then
+  HAS_TEMPLATE=1
+fi
+HAS_TEMPLATE_POOL=0
+if pvesh get /pools --output-format json | json_has poolid "$TEMPLATE_POOL"; then HAS_TEMPLATE_POOL=1; fi
+HAS_CLONE_ROLE=0
+if pveum role list --output-format json | json_has roleid "$TF_CLONE_ROLE"; then HAS_CLONE_ROLE=1; fi
+
+POOLS_TO_CHECK=("$MGMT_POOL" "${OP_POOL_NAMES[@]}")
+if [[ $HAS_TEMPLATE_POOL -eq 1 ]]; then POOLS_TO_CHECK+=("$TEMPLATE_POOL"); fi
+ROLES_TO_CHECK=("$TF_ROLE" "$TF_SDN_ROLE")
+if [[ $HAS_CLONE_ROLE -eq 1 ]]; then ROLES_TO_CHECK+=("$TF_CLONE_ROLE"); fi
+
 echo "  - LXC ${CTID} (${CT_HOSTNAME})"
-echo "  - VM template ${TEMPLATE_VMID} (${TEMPLATE_NAME})"
-echo "  - Pools ${MGMT_POOL} ${OP_POOL_NAMES[*]} ${TEMPLATE_POOL} (if empty and created by this project)"
+if [[ $HAS_TEMPLATE -eq 1 ]]; then echo "  - VM template ${TEMPLATE_VMID} (${TEMPLATE_NAME})"; fi
+echo "  - Pools ${POOLS_TO_CHECK[*]} (if empty and created by this project)"
 echo "  - User ${TF_USER} (with its tokens and ACLs)"
-echo "  - Roles ${TF_ROLE}, ${TF_SDN_ROLE}, ${TF_CLONE_ROLE}"
+echo "  - Roles ${ROLES_TO_CHECK[*]}"
 if [[ "$RESET_SDN" == "1" ]]; then
   echo "  - SDN subnet ${SDN_SUBNET}, vnet ${SDN_VNET}, zone ${SDN_ZONE} (if unused)"
 fi
@@ -286,14 +302,12 @@ if qm status "$TEMPLATE_VMID" &>/dev/null; then
     log "Destroying VM template ${TEMPLATE_VMID} (${TEMPLATE_NAME})"
     run qm destroy "$TEMPLATE_VMID" --purge 1
   fi
-else
-  log "VM template ${TEMPLATE_VMID} not found -> skipping"
-fi
+fi   # No template: nothing to say, it is optional
 
 # =============================================================
 # 3. Pools
 # =============================================================
-for POOL in "$MGMT_POOL" "${OP_POOL_NAMES[@]}" "$TEMPLATE_POOL"; do
+for POOL in "${POOLS_TO_CHECK[@]}"; do
   if ! pvesh get /pools --output-format json | json_has poolid "$POOL"; then
     log "Pool '${POOL}' not found -> skipping"
     continue
@@ -322,7 +336,7 @@ else
   log "User '${TF_USER}' not found -> skipping"
 fi
 
-for ROLE in "$TF_ROLE" "$TF_SDN_ROLE" "$TF_CLONE_ROLE"; do
+for ROLE in "${ROLES_TO_CHECK[@]}"; do
   if pveum role list --output-format json | json_has roleid "$ROLE"; then
     log "Removing role '${ROLE}'"
     run pveum role delete "$ROLE"
