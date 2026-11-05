@@ -8,6 +8,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/combatreadiness/proxmox-
 
 Run it as root in the Proxmox host shell. Pick Default or Advanced settings, confirm, and it sets everything up. Running it again is safe.
 
+Rather write the settings in a file first and review them? See [Install from a settings file](#install-from-a-settings-file).
+
 ## What you get
 
 ```
@@ -81,6 +83,34 @@ The ones you are most likely to change:
 | `PVE_TLS_INSECURE` | `1` | See [Security](#security) |
 
 Change the file, then run `dsoadm init` again.
+
+## Install from a settings file
+
+If you'd rather treat the settings like any other IaC file: install first, edit the file, then run.
+
+```bash
+# 1. Get the installer and install dsoadm only. Writes the settings file with defaults, asks nothing.
+curl -fsSLO https://raw.githubusercontent.com/combatreadiness/proxmox-iac-bootstrap/main/install.sh
+PIB_YES=1 PIB_NO_INIT=1 bash install.sh
+
+# 2. Edit the settings
+vi /etc/proxmox-iac-bootstrap/bootstrap.env
+
+# 3. Run it
+dsoadm init
+```
+
+Step 1 writes only the common keys. Every other key, with its default and a short note, is in `/usr/local/lib/proxmox-iac-bootstrap/bootstrap/bootstrap.env.example`; copy the lines you need into your file.
+
+Already keep the file in Git? Copy it into place before step 1, and the installer uses it as it is:
+
+```bash
+install -d -m 700 /etc/proxmox-iac-bootstrap
+install -m 600 bootstrap.env /etc/proxmox-iac-bootstrap/bootstrap.env
+PIB_YES=1 bash install.sh
+```
+
+Put settings in the file, not in front of the command (`CTID=300 bash install.sh`). A value passed that way is used for that run but not saved, so the next `dsoadm init` goes back to what the file says.
 
 ## After install
 
