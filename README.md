@@ -105,6 +105,7 @@ Runs on the Proxmox host, as root.
 | `dsoadm template` | Builds a Debian cloud-init VM template for OpenTofu to clone |
 | `dsoadm facts` | Writes host facts (node, storage, images) to the LXC |
 | `dsoadm reset [--dry-run] [--sdn] [--purge] [-y]` | Removes what `init` and `template` created |
+| `dsoadm uninstall [--keep-config] [--dry-run] [-y]` | `reset --purge --sdn`, then removes downloaded images and `dsoadm` itself |
 | `dsoadm version` | Installed version and which config file is used |
 
 To update `dsoadm`, run the install command again. Your config is kept.
@@ -132,6 +133,15 @@ Set `TEARDOWN_CMD` in the config to let your own tool go first. `--purge` runs i
 ```
 TEARDOWN_CMD=dsoctl down --all
 ```
+
+To take everything off the host, including this tool:
+
+```bash
+dsoadm uninstall --dry-run   # look first
+dsoadm uninstall
+```
+
+That is `reset --purge --sdn`, then it deletes the Debian LXC template and cloud image this project downloaded, `/usr/local/lib/proxmox-iac-bootstrap`, `/usr/local/sbin/dsoadm`, and `/etc/proxmox-iac-bootstrap` (keep the last one with `--keep-config`). Back up anything on the management node you want to keep first.
 
 ## Security
 

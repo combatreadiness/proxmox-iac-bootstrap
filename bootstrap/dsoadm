@@ -21,6 +21,9 @@ Usage:
   dsoadm facts                                    Tell the management node about this host
   dsoadm reset    [--dry-run] [--sdn] [--purge] [-y]
                                                   Undo what init and template created
+  dsoadm uninstall [--keep-config] [--dry-run] [-y]
+                                                  reset --purge --sdn, then remove downloaded
+                                                  images and dsoadm itself
   dsoadm version                                  Show the installed version and config file
 
 Options:
@@ -31,6 +34,7 @@ Options:
   --purge          Also remove guests in the operational pools (and, with --sdn,
                    the other vnets in the zone). Runs TEARDOWN_CMD first if set.
   -y, --yes        Do not ask for confirmation
+  --keep-config    uninstall: keep /etc/proxmox-iac-bootstrap
 
 Config file (first one found):
   $CONFIG_FILE, /etc/proxmox-iac-bootstrap/bootstrap.env, <install dir>/bootstrap/bootstrap.env
@@ -46,6 +50,16 @@ fi
 export CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-iac-bootstrap/bootstrap.env}"
 
 [[ "$DSO_BACKEND" == "proxmox" ]] || die "Unsupported backend '${DSO_BACKEND}'"
+
+# cfg <KEY> <default>  -> value from the config file (last match), else the default
+cfg() {
+  local v=""
+  if [[ -f "$CONFIG_FILE" ]]; then
+    v=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_FILE" | tail -n1 | cut -d= -f2- || true)
+    v="${v%%#*}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  fi
+  echo "${v:-$2}"
+}
 
 need_root() { [[ $EUID -eq 0 ]] || die "'dsoadm $1' must run as root on the Proxmox host."; }
 
@@ -91,6 +105,58 @@ case "$CMD" in
       esac
     done
     exec "${DIR}/pve-reset.sh"
+    ;;
+  uninstall)
+    need_root uninstall
+    KEEP_CONFIG=0; YES=0; DRY=0
+    for a in "$@"; do
+      case "$a" in
+        --keep-config) KEEP_CONFIG=1 ;;
+        --dry-run)     DRY=1 ;;
+        -y|--yes)      YES=1 ;;
+        *) die "Unknown option for uninstall: $a" ;;
+      esac
+    done
+    INSTALLED_LIB=/usr/local/lib/proxmox-iac-bootstrap
+    BIN_LINK=/usr/local/sbin/dsoadm
+    ETC_DIR=/etc/proxmox-iac-bootstrap
+    LIB_DIR="$(cd "${DIR}/.." && pwd)"
+    TMPL_STORAGE="$(cfg TMPL_STORAGE local)"
+    DEBIAN_VERSION="$(cfg DEBIAN_VERSION 12)"
+    IMAGE_DIR="$(cfg IMAGE_DIR /var/lib/vz/template/cache)"
+    IMAGE_FILE="$(cfg IMAGE_FILE debian-12-genericcloud-amd64.qcow2)"
+    mapfile -t LXC_TEMPLATES < <(pveam list "$TMPL_STORAGE" 2>/dev/null | awk '{print $1}' \
+      | grep -E "/debian-${DEBIAN_VERSION}-standard_" || true)
+
+    echo
+    echo "After the reset below, uninstall also removes:"
+    for t in "${LXC_TEMPLATES[@]}"; do echo "  - LXC template ${t}"; done
+    for f in "${IMAGE_DIR}/${IMAGE_FILE}" "${IMAGE_DIR}/${IMAGE_FILE}.SHA512SUMS"; do
+      if [[ -e "$f" ]]; then echo "  - ${f}"; fi
+    done
+    if [[ "$LIB_DIR" == "$INSTALLED_LIB" ]]; then
+      echo "  - ${INSTALLED_LIB} and ${BIN_LINK}"
+    else
+      echo "  - (dsoadm runs from ${LIB_DIR}, a source folder: left alone)"
+    fi
+    if [[ $KEEP_CONFIG -eq 0 ]]; then echo "  - ${ETC_DIR}"; fi
+
+    # Reset asks for confirmation (unless -y) and stops on any problem
+    DRY_RUN="$DRY" FORCE="$YES" PURGE=1 RESET_SDN=1 "${DIR}/pve-reset.sh"
+
+    run() { if [[ $DRY -eq 1 ]]; then echo -e "\e[1;36m[dry-run]\e[0m $*"; else "$@"; fi; }
+    for t in "${LXC_TEMPLATES[@]}"; do run pveam remove "$t"; done
+    run rm -f "${IMAGE_DIR}/${IMAGE_FILE}" "${IMAGE_DIR}/${IMAGE_FILE}.SHA512SUMS"
+    if [[ $KEEP_CONFIG -eq 0 ]]; then run rm -rf "$ETC_DIR"; fi
+    if [[ "$LIB_DIR" == "$INSTALLED_LIB" ]]; then
+      if [[ "$(readlink "$BIN_LINK" 2>/dev/null)" == "${INSTALLED_LIB}/"* ]]; then run rm -f "$BIN_LINK"; fi
+      run rm -rf "$INSTALLED_LIB"   # Last: this script lives there (already loaded, so safe)
+    fi
+    if [[ $DRY -eq 1 ]]; then
+      echo -e "  \e[1;33m⚠\e[0m Dry run: nothing was removed."
+    else
+      echo -e "  \e[1;32m✔\e[0m Uninstalled. To install again, run the one-line installer."
+    fi
     ;;
   version|--version)
     if [[ -f "${DIR}/../VERSION" ]]; then
