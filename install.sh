@@ -135,18 +135,74 @@ msg_ok "Required commands present"
 echo; echo "${DIM}  Settings${CL}"
 # =============================================================
 install -d -m 700 "$ETC_DIR"
+
+# Current values: the existing config wins over the defaults
+for k in "${KEYS[@]}"; do VAL[$k]="${DEF[$k]}"; done
 if [[ -f "$CONFIG" ]]; then
-  current=$(grep -Ev '^[[:space:]]*(#|$)' "$CONFIG" || true)
-  if [[ $INTERACTIVE -eq 1 ]]; then
-    yesno "Existing settings" "Found ${CONFIG}:
+  while IFS='=' read -r k v; do
+    k="${k//[[:space:]]/}"
+    if [[ -n "$k" && -v "DEF[$k]" ]]; then
+      v="${v%%#*}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+      VAL[$k]="$v"
+    fi
+  done < <(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$CONFIG")
+fi
 
-${current}
+edit_settings() {  # one input box per setting, prefilled with the current value
+  local k v
+  for k in "${KEYS[@]}"; do
+    v=$(ask "${LABEL[$k]}" "${VAL[$k]}") || msg_err "Cancelled. Nothing was changed."
+    VAL[$k]="$v"
+  done
+}
 
-Use these settings?" || msg_err "Edit ${CONFIG}, then run: dsoadm init"
+# Write KEYS into the config; other lines (comments, TEARDOWN_CMD, ...) are kept
+save_settings() {
+  local tmp k done_keys=" "
+  umask 077
+  tmp="$(mktemp "${ETC_DIR}/.bootstrap.env.XXXXXX")"
+  if [[ -f "$CONFIG" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      k="${line%%=*}"; k="${k//[[:space:]]/}"
+      if [[ "$line" == *=* && -v "DEF[$k]" ]]; then
+        echo "${k}=${VAL[$k]}"; done_keys+="${k} "
+      else
+        echo "$line"
+      fi
+    done < "$CONFIG" > "$tmp"
+  else
+    {
+      echo "# Written by install.sh on $(date -u +%Y-%m-%dT%H:%MZ)."
+      echo "# All keys and defaults: ${LIB_DIR}/bootstrap/bootstrap.env.example"
+    } > "$tmp"
   fi
+  for k in "${KEYS[@]}"; do
+    if [[ "$done_keys" != *" ${k} "* ]]; then echo "${k}=${VAL[$k]}" >> "$tmp"; fi
+  done
+  mv "$tmp" "$CONFIG"
+}
+
+if [[ -f "$CONFIG" && ( $INTERACTIVE -eq 0 || "$PIB_NO_INIT" == "1" ) ]]; then
+  # Updating only, or no one to ask: keep the file as it is
   msg_ok "Using ${CONFIG}"
+elif [[ -f "$CONFIG" ]]; then
+  if yesno "Existing settings" "Found ${CONFIG}:
+
+$(summary)
+
+Yes = use these.  No = change them."; then
+    msg_ok "Using ${CONFIG}"
+  else
+    edit_settings
+    yesno "Ready" "These settings will be used:
+
+$(summary)
+
+Continue?" || msg_err "Cancelled. Nothing was changed."
+    save_settings
+    msg_ok "Updated ${CONFIG}"
+  fi
 else
-  for k in "${KEYS[@]}"; do VAL[$k]="${DEF[$k]}"; done
   if [[ $INTERACTIVE -eq 1 ]]; then
     mode="default"
     if [[ $USE_WT -eq 1 ]]; then
@@ -156,24 +212,14 @@ else
       read -r -p "    Use default settings? [Y/n]: " a </dev/tty || true
       if [[ -n "$a" && ! "$a" =~ ^[Yy] ]]; then mode="advanced"; fi
     fi
-    if [[ "$mode" == "advanced" ]]; then
-      for k in "${KEYS[@]}"; do
-        v=$(ask "${LABEL[$k]}" "${VAL[$k]}") || msg_err "Cancelled. Nothing was changed."
-        VAL[$k]="$v"
-      done
-    fi
+    if [[ "$mode" == "advanced" ]]; then edit_settings; fi
     yesno "Ready" "These settings will be used:
 
 $(summary)
 
 Continue?" || msg_err "Cancelled. Nothing was changed."
   fi
-  umask 077
-  {
-    echo "# Written by install.sh on $(date -u +%Y-%m-%dT%H:%MZ)."
-    echo "# All keys and defaults: ${LIB_DIR}/bootstrap/bootstrap.env.example"
-    for k in "${KEYS[@]}"; do echo "${k}=${VAL[$k]}"; done
-  } > "$CONFIG"
+  save_settings
   msg_ok "Wrote ${CONFIG}"
 fi
 
