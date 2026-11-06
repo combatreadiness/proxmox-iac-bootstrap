@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # many variables here are set for the scripts that source this file
 # =============================================================
 # lib.sh — shared by dsoadm and the pve-*.sh scripts (sourced, not run)
 #
