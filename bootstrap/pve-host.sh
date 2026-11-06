@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================
-# pve-host.sh — Proxmox host onboarding (called by `dsoadm init`)
-#   1) Create API user / roles / token for OpenTofu (Terraform)
-#   2) Create the SDN network for the management node (skipped if present)
-#   3) Create the management pool and empty operational pools,
-#      and limit the API account to the operational pools (least privilege)
-#   4) Download a Debian LXC template
-#   5) Create and start the management LXC
-#   6) Deliver API credentials and SSH keys into the LXC
-#   7) Run mgmt-node.sh inside the LXC
+# pve-host.sh — Proxmox host onboarding for one environment (`dsoadm init`)
+#   1) API user / roles / token for OpenTofu
+#   2) SDN network for the management node (existing pieces are checked, not changed)
+#   3) Management pool + operational pools, API account limited to the latter
+#   4) Debian LXC template
+#   5) Management LXC
+#   6) API credentials and SSH keys into the LXC
+#   7) mgmt-node.sh inside the LXC
+# Everything it creates is recorded in envs/<env>.state; reset removes only that.
 #
-# Run on : Proxmox host shell (as root)
-# Usage  : dsoadm init                            (normal way)
-#          CONFIG_FILE=/path/to/other.env ./pve-host.sh
-#          ROTATE_TOKEN=1 ./pve-host.sh           (reissue the API token)
-#          ACL_SCOPE=root ./pve-host.sh           (grant the whole datacenter; debugging only)
-# Notes  : Uses only tools already on the host. Nothing is installed on the host.
+# Run on : Proxmox host shell (as root), via `dsoadm init [--env NAME]`
 # Re-run : Safe; existing resources are skipped.
 # =============================================================
 set -euo pipefail
@@ -23,138 +18,24 @@ set -euo pipefail
 # containers: the container's root cannot enter its own rootfs folder.
 umask 022
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# ---------- Helpers ----------
-log()  { echo -e "  \e[1;32m✔\e[0m $*"; }
-warn() { echo -e "  \e[1;33m⚠\e[0m $*"; }
-die()  { echo -e "  \e[1;31m✖\e[0m $*" >&2; exit 1; }
-# Show a command's own output, indented and dimmed
-indent() { sed -u $'s/^/      \e[2m/; s/$/\e[0m/'; }
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=bootstrap/lib.sh
+. "${SCRIPT_DIR}/lib.sh"
 
-# Read KEY=VALUE lines from a config file without executing it.
-# Variables already set (e.g. passed on the command line) take precedence.
-load_config() {
-  local file="$1" key value
-  [[ -f "$file" ]] || return 0
-  while IFS='=' read -r key value || [[ -n "$key" ]]; do
-    key="${key//[[:space:]]/}"
-    if [[ -z "$key" || "$key" == \#* ]]; then continue; fi
-    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-      warn "Ignoring invalid line in ${file}: ${key}"
-      continue
-    fi
-    value="${value%%#*}"                        # Strip inline comments
-    value="${value#"${value%%[![:space:]]*}"}"  # Trim leading spaces
-    value="${value%"${value##*[![:space:]]}"}"  # Trim trailing spaces
-    if [[ -z "${!key+x}" ]]; then
-      printf -v "$key" '%s' "$value"
-    fi
-  done < "$file"
-}
+select_env
+apply_defaults
 
-# pool_name mgmt -> <prefix>-mgmt (or "mgmt" when the prefix is empty)
-pool_name() {
-  if [[ -n "$POOL_PREFIX" ]]; then echo "${POOL_PREFIX}-$1"; else echo "$1"; fi
-}
-
-# <json array> | json_has <key> <value>   -> exit 0 if any item matches
-json_has() {
-  python3 -c '
-import json, sys
-key, val = sys.argv[1], sys.argv[2]
-sys.exit(0 if any(d.get(key) == val for d in json.load(sys.stdin)) else 1)' "$1" "$2"
-}
-
-# <json array> | json_get <key> <value> <field>   -> print field of first match
-json_get() {
-  python3 -c '
-import json, sys
-key, val, field = sys.argv[1:4]
-for d in json.load(sys.stdin):
-    if d.get(key) == val:
-        print(d.get(field, "") or "")
-        break' "$1" "$2" "$3"
-}
-
-# <subnet json array> | subnet_id <cidr>   -> print the subnet ID (e.g. lab-10.73.10.0-24)
-subnet_id() {
-  python3 -c '
-import json, sys
-cidr = sys.argv[1]
-suffix = cidr.replace("/", "-")
-for d in json.load(sys.stdin):
-    sid = str(d.get("subnet", ""))
-    if d.get("cidr") == cidr or sid.endswith(suffix):
-        print(sid)
-        break' "$1"
-}
-
-# expect <what> <actual> <wanted>  -> warn when an existing resource differs from the config
-SDN_MISMATCH=0
-expect() {
-  if [[ "$2" != "$3" ]]; then
-    warn "${1}: found '${2}', config wants '${3}'. Not changing it."
-    SDN_MISMATCH=1
-  fi
-}
-
-# First config file found wins (dsoadm normally sets CONFIG_FILE already)
-if [[ -z "${CONFIG_FILE:-}" ]]; then
-  for f in /etc/proxmox-iac-bootstrap/bootstrap.env "${SCRIPT_DIR}/bootstrap.env"; do
-    if [[ -f "$f" ]]; then CONFIG_FILE="$f"; break; fi
-  done
-fi
-CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-iac-bootstrap/bootstrap.env}"
-load_config "$CONFIG_FILE"
-
-# ---------- Defaults (used when not set in the config file) ----------
-PROJECT_ID="${PROJECT_ID:-lab}"
-
-SDN_ZONE="${SDN_ZONE:-lab}"
-SDN_VNET="${SDN_VNET:-lmgmt}"
-SDN_SUBNET="${SDN_SUBNET:-10.73.10.0/24}"
-SDN_GATEWAY="${SDN_GATEWAY:-10.73.10.1}"
-
-CTID="${CTID:-200}"
-CT_HOSTNAME="${CT_HOSTNAME:-iac-mgmt}"
-CT_CORES="${CT_CORES:-1}"
-CT_MEMORY="${CT_MEMORY:-1024}"
-CT_SWAP="${CT_SWAP:-512}"
-CT_DISK="${CT_DISK:-10}"
-CT_STORAGE="${CT_STORAGE:-local-lvm}"
-TMPL_STORAGE="${TMPL_STORAGE:-local}"
-CT_IP="${CT_IP:-10.73.10.10/24}"
-CT_GW="${CT_GW:-$SDN_GATEWAY}"
-BRIDGE="${BRIDGE:-$SDN_VNET}"
-DEBIAN_VERSION="${DEBIAN_VERSION:-12}"
-SSH_PUBKEY_FILE="${SSH_PUBKEY_FILE-/root/.ssh/authorized_keys}"
-
-TF_USER="${TF_USER:-terraform@pve}"
-TF_ROLE="${TF_ROLE:-TerraformRole}"
-TF_SDN_ROLE="${TF_SDN_ROLE:-TerraformSDNApply}"   # Only SDN.Allocate, granted on /sdn without propagation
-TF_TOKEN_ID="${TF_TOKEN_ID:-provider}"
 ROTATE_TOKEN="${ROTATE_TOKEN:-0}"
-PVE_TLS_INSECURE="${PVE_TLS_INSECURE:-1}"   # 1 = skip the API certificate check (PVE's default cert is self-signed)
-
-POOL_PREFIX="${POOL_PREFIX-lab}"            # "-" so an empty prefix is respected
-OP_POOLS="${OP_POOLS:-workloads}"   # Operational pools OpenTofu may fill (space-separated)
-ACL_SCOPE="${ACL_SCOPE:-narrow}"            # narrow = operational pools only; root = whole datacenter
 NODE_NAME="${NODE_NAME:-$(hostname)}"
-ALLOW_EXISTING_POOL="${ALLOW_EXISTING_POOL:-0}"
 SET_TAG_COLORS="${SET_TAG_COLORS:-0}"
-
 RUN_MGMT_SETUP="${RUN_MGMT_SETUP:-1}"
 REPO_URL="${REPO_URL:-}"
 REPO_LINK="${REPO_LINK:-}"
 MGMT_SCRIPT="${MGMT_SCRIPT:-${SCRIPT_DIR}/mgmt-node.sh}"
-
-# Derived values
-PROJECT_MARKER="managed-by:${PROJECT_ID}"            # Stored only in pool comments
-CRED_PATH="/root/.config/${PROJECT_ID}/credentials.env"
 PVE_API_IP="${PVE_API_IP:-$SDN_GATEWAY}"              # Host address on the internal network
 PVE_LAN_IP="${PVE_LAN_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null \
   | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')}"
-LAB_POOL="$(pool_name mgmt)"
+MGMT_POOL="$(pool_name mgmt)"
 
 WANTED_PRIVS=(
   Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit
@@ -170,12 +51,22 @@ TMP_CRED=""
 cleanup() { if [[ -n "$TMP_CRED" ]]; then rm -f "$TMP_CRED"; fi; }
 trap cleanup EXIT
 
+# expect <what> <actual> <wanted>  -> warn when an existing resource differs from the config
+SDN_MISMATCH=0
+expect() {
+  if [[ "$2" != "$3" ]]; then
+    warn "${1}: found '${2}', config wants '${3}'. Not changing it."
+    SDN_MISMATCH=1
+  fi
+}
+
 # =============================================================
 # 0. Pre-flight checks
 # =============================================================
 [[ $EUID -eq 0 ]] || die "Must be run as root."
 command -v pveversion >/dev/null || die "This script must run on a Proxmox VE host."
-(( ${#SDN_VNET} <= 8 )) || die "SDN_VNET must be 8 characters or fewer."
+[[ "$SDN_VNET" =~ $VNET_RE ]] || die "SDN_VNET '${SDN_VNET}': lowercase letters and digits, starting with a letter, 8 characters max."
+[[ -n "$SDN_GATEWAY" ]] || die "SDN_SUBNET '${SDN_SUBNET}' is not a valid subnet."
 [[ "$ACL_SCOPE" == "narrow" || "$ACL_SCOPE" == "root" ]] || die "ACL_SCOPE must be 'narrow' or 'root'."
 [[ "$PVE_TLS_INSECURE" == "0" || "$PVE_TLS_INSECURE" == "1" ]] || die "PVE_TLS_INSECURE must be 0 or 1."
 if [[ "$RUN_MGMT_SETUP" == "1" && ! -f "$MGMT_SCRIPT" ]]; then
@@ -186,10 +77,19 @@ if [[ -n "$SSH_PUBKEY_FILE" && ! -s "$SSH_PUBKEY_FILE" ]]; then
   SSH_PUBKEY_FILE=""
 fi
 
-log "Proxmox : $(pveversion)"
-if [[ -f "$CONFIG_FILE" ]]; then log "Config  : ${CONFIG_FILE}"; else log "Config  : (none, using defaults)"; fi
-log "Plan    : LXC ${CTID} (${CT_HOSTNAME}) @ ${CT_IP} on ${BRIDGE}, pool ${LAB_POOL}"
-log "ACL     : ${ACL_SCOPE}"
+# Nothing another environment created may be reused
+not_others zone   "$SDN_ZONE"    "SDN zone '${SDN_ZONE}'"
+not_others vnet   "$SDN_VNET"    "SDN vnet '${SDN_VNET}'"
+not_others lxc    "$CTID"        "CTID ${CTID}"
+not_others user   "$TF_USER"     "API user '${TF_USER}'"
+not_others pool   "$MGMT_POOL"   "Pool '${MGMT_POOL}'"
+for p in $OP_POOLS; do not_others pool "$(pool_name "$p")" "Pool '$(pool_name "$p")'"; done
+
+log "Environment : ${ENV_NAME}"
+log "Proxmox     : $(pveversion)"
+if [[ -f "$CONFIG_FILE" ]]; then log "Config      : ${CONFIG_FILE}"; else log "Config      : (none, using defaults)"; fi
+log "Plan        : LXC ${CTID} (${CT_HOSTNAME}) @ ${CT_IP} on ${SDN_VNET_ALIAS} (vnet ${SDN_VNET}), pool ${MGMT_POOL}"
+log "ACL         : ${ACL_SCOPE}"
 
 # =============================================================
 # 1. Roles, user, token
@@ -224,6 +124,7 @@ ensure_role() {
   else
     log "Creating role '${role}'"
     pveum role add "$role" --privs "$*"
+    state_add role "$role"
   fi
 }
 ensure_role "$TF_ROLE" "${VALID_PRIVS[@]}"
@@ -234,22 +135,22 @@ if pveum user list --output-format json | json_has userid "$TF_USER"; then
   log "User '${TF_USER}' already exists -> skipping"
 else
   log "Creating user '${TF_USER}'"
-  pveum user add "$TF_USER" --comment "IaC (OpenTofu/Terraform)"
+  pveum user add "$TF_USER" --comment "IaC (OpenTofu) for environment ${ENV_NAME} [${PROJECT_MARKER}]"
+  state_add user "$TF_USER"
 fi
-# Permissions (ACLs) are granted in step 3, after the pools exist.
 
 TOKEN_VALUE=""
 # The token value is shown only when issued, and it lives only in the management
 # node's credentials file. Keep the token only while that file can still hold it.
 if pveum user token list "$TF_USER" --output-format json | json_has tokenid "$TF_TOKEN_ID"; then
   if [[ "$ROTATE_TOKEN" == "1" ]]; then
-    warn "Removing existing token and reissuing (ROTATE_TOKEN=1)"
+    warn "Removing existing token and reissuing (--rotate-token)"
     pveum user token remove "$TF_USER" "$TF_TOKEN_ID"
   elif ! pct status "$CTID" &>/dev/null; then
     warn "Management node ${CTID} will be created fresh and cannot know the old token -> reissuing"
     pveum user token remove "$TF_USER" "$TF_TOKEN_ID"
   elif ! pct exec "$CTID" -- test -f "$CRED_PATH" 2>/dev/null; then
-    die "Token exists but ${CRED_PATH} is missing in LXC ${CTID}. Run: dsoadm init --rotate-token"
+    die "Token exists but ${CRED_PATH} is missing in LXC ${CTID}. Run: dsoadm init --env ${ENV_NAME} --rotate-token"
   else
     log "Token '${TF_USER}!${TF_TOKEN_ID}' already exists -> not reissuing"
   fi
@@ -265,7 +166,6 @@ fi
 # =============================================================
 # 2. SDN network for the management node
 # =============================================================
-# Existing pieces are checked against the config but never modified.
 SDN_CHANGED=0   # Apply only when something was created
 
 ZONES_JSON=$(pvesh get /cluster/sdn/zones --output-format json)
@@ -275,6 +175,7 @@ if json_has zone "$SDN_ZONE" <<<"$ZONES_JSON"; then
 else
   log "Creating SDN zone '${SDN_ZONE}' (simple)"
   pvesh create /cluster/sdn/zones --zone "$SDN_ZONE" --type simple
+  state_add zone "$SDN_ZONE"
   SDN_CHANGED=1
 fi
 
@@ -283,8 +184,9 @@ if json_has vnet "$SDN_VNET" <<<"$VNETS_JSON"; then
   log "SDN vnet '${SDN_VNET}' already exists -> checking"
   expect "VNet ${SDN_VNET} zone" "$(json_get vnet "$SDN_VNET" zone <<<"$VNETS_JSON")" "$SDN_ZONE"
 else
-  log "Creating SDN vnet '${SDN_VNET}'"
-  pvesh create /cluster/sdn/vnets --vnet "$SDN_VNET" --zone "$SDN_ZONE"
+  log "Creating SDN vnet '${SDN_VNET}' (${SDN_VNET_ALIAS})"
+  pvesh create /cluster/sdn/vnets --vnet "$SDN_VNET" --zone "$SDN_ZONE" --alias "$SDN_VNET_ALIAS"
+  state_add vnet "$SDN_VNET"
   SDN_CHANGED=1
 fi
 
@@ -298,6 +200,8 @@ else
   log "Creating SDN subnet '${SDN_SUBNET}' (gateway ${SDN_GATEWAY}, SNAT on)"
   pvesh create "/cluster/sdn/vnets/${SDN_VNET}/subnets" \
     --subnet "$SDN_SUBNET" --type subnet --gateway "$SDN_GATEWAY" --snat 1
+  EXISTING_SUBNET=$(pvesh get "/cluster/sdn/vnets/${SDN_VNET}/subnets" --output-format json | subnet_id "$SDN_SUBNET")
+  state_add subnet "${SDN_VNET}/${EXISTING_SUBNET}"
   SDN_CHANGED=1
 fi
 if [[ $SDN_MISMATCH -eq 1 ]]; then
@@ -318,7 +222,7 @@ ip link show "$BRIDGE" &>/dev/null || die "Bridge '${BRIDGE}' not found."
 # =============================================================
 # 3. Pools and permissions
 # =============================================================
-# Pool comments carry PROJECT_MARKER so a pool the user created
+# Pool comments carry PROJECT_MARKER so a pool someone created
 # for something else is never adopted silently.
 ensure_pool() {  # ensure_pool <name> <description>
   local pool="$1" desc="$2" comment
@@ -327,17 +231,18 @@ ensure_pool() {  # ensure_pool <name> <description>
     if [[ "$comment" == *"$PROJECT_MARKER"* ]]; then
       log "Pool '${pool}' already exists -> skipping"
     elif [[ "$ALLOW_EXISTING_POOL" == "1" ]]; then
-      warn "Reusing pool '${pool}' not created by this project (ALLOW_EXISTING_POOL=1)"
+      warn "Reusing pool '${pool}' not created by this environment (ALLOW_EXISTING_POOL=1)"
     else
-      die "Pool '${pool}' exists but was not created by this project. Change POOL_PREFIX or set ALLOW_EXISTING_POOL=1."
+      die "Pool '${pool}' exists but was not created by environment '${ENV_NAME}'. Change POOL_PREFIX or set ALLOW_EXISTING_POOL=1."
     fi
   else
     log "Creating pool '${pool}'"
     pvesh create /pools --poolid "$pool" --comment "${desc} [${PROJECT_MARKER}]"
+    state_add pool "$pool"
   fi
 }
 
-ensure_pool "$LAB_POOL" "Management node"
+ensure_pool "$MGMT_POOL" "Management node"
 OP_POOL_NAMES=()
 for p in $OP_POOLS; do
   OP_POOL_NAMES+=("$(pool_name "$p")")
@@ -354,7 +259,6 @@ sys.exit(0 if any(a.get("path") == path and a.get("ugid") == user and a.get("rol
 }
 
 # grant <path> <role> [propagate: 1|0]
-#   propagate=0 applies the role to that exact path only, not to anything below it
 grant() {
   local propagate="${3:-1}"
   if acl_has "$1" "$2"; then
@@ -369,7 +273,6 @@ if [[ "$ACL_SCOPE" == "root" ]]; then
   warn "ACL_SCOPE=root: '${TF_USER}' can manage the whole datacenter"
   grant / "$TF_ROLE"
 else
-  # Remove the datacenter-wide grant left by earlier versions of this script
   if acl_has / "$TF_ROLE"; then
     log "Removing datacenter-wide ACL (/) from '${TF_USER}'"
     pveum acl delete / --users "$TF_USER" --roles "$TF_ROLE"
@@ -385,9 +288,8 @@ else
 fi
 
 # =============================================================
-# 4. Debian template
+# 4. Debian template (a shared download cache, not part of any environment)
 # =============================================================
-# Use a template already in storage if there is one; only go online when needed
 TEMPLATE=$(
   pveam list "$TMPL_STORAGE" | awk '{print $1}' | sed 's#.*/##' \
     | grep -E "^debian-${DEBIAN_VERSION}-standard_" | sort -V | tail -n1 || true
@@ -409,13 +311,12 @@ fi
 # =============================================================
 # 5. Management LXC
 # =============================================================
-# Markdown shown in the Proxmox UI "Summary -> Notes" panel
 CT_DESCRIPTION=$(cat <<EOF
 ## ${CT_HOSTNAME}
-Management node for **OpenTofu** and **Ansible**.
+Management node for **OpenTofu** and **Ansible**, environment \`${ENV_NAME}\`.
 
-- Pool: \`${LAB_POOL}\`
-- Network: \`${BRIDGE}\` (${CT_IP})
+- Pool: \`${MGMT_POOL}\`
+- Network: \`${SDN_VNET_ALIAS}\` (vnet \`${SDN_VNET}\`, ${CT_IP})
 - Do not manage this container with OpenTofu/Terraform.
 EOF
 )
@@ -434,15 +335,16 @@ else
     --rootfs "${CT_STORAGE}:${CT_DISK}"
     --net0 "$NET0"
     --ostype debian
-    --unprivileged 1          # Isolated from host root
-    --features nesting=1      # Needed by modern systemd
-    --onboot 1                # Start with the host
-    --pool "$LAB_POOL"
-    --tags "mgmt;bootstrap"   # What it is; who created it
+    --unprivileged 1
+    --features nesting=1
+    --onboot 1
+    --pool "$MGMT_POOL"
+    --tags "mgmt;bootstrap;env-${ENV_NAME}"
     --description "$CT_DESCRIPTION"
   )
-  log "Creating LXC ${CTID} (${CT_HOSTNAME}) on ${BRIDGE} (${CT_IP})"
+  log "Creating LXC ${CTID} (${CT_HOSTNAME}) on ${SDN_VNET_ALIAS} (${CT_IP})"
   pct create "$CTID" "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" "${CREATE_ARGS[@]}" 2>&1 | indent
+  state_add lxc "$CTID"
 fi
 
 if ! pct status "$CTID" | grep -q running; then
@@ -476,7 +378,7 @@ if [[ -n "$TOKEN_VALUE" ]]; then
   TMP_CRED=$(mktemp)
   chmod 600 "$TMP_CRED"
   cat > "$TMP_CRED" <<EOF
-# Proxmox API credentials — never commit this file
+# Proxmox API credentials for environment ${ENV_NAME} — never commit this file
 export PROXMOX_VE_ENDPOINT="https://${PVE_API_IP}:8006/"
 export PROXMOX_VE_API_TOKEN="${TF_USER}!${TF_TOKEN_ID}=${TOKEN_VALUE}"
 export PROXMOX_VE_INSECURE="${INSECURE_VALUE}"
@@ -486,8 +388,7 @@ EOF
   log "Credentials saved: ${CRED_PATH} inside LXC ${CTID}"
 fi
 
-# Merge the host's authorized keys into the LXC (works for new and existing LXCs).
-# Keys already in the LXC are kept.
+# Merge the host's authorized keys into the LXC; keys already there are kept
 if [[ -n "$SSH_PUBKEY_FILE" ]]; then
   log "Syncing SSH keys from ${SSH_PUBKEY_FILE}"
   pct exec "$CTID" -- install -d -m 700 /root/.ssh
@@ -525,7 +426,8 @@ summary_box() {
 cat <<EOF
 
 ────────────────────────────────────────────
- Done: LXC ${CTID} (${CT_HOSTNAME}) @ ${CT_IP%/*}
+ Done: environment ${ENV_NAME}
+   LXC ${CTID} (${CT_HOSTNAME}) @ ${CT_IP%/*} on ${SDN_VNET_ALIAS}
 
  On the host:  pct enter ${CTID}
 
