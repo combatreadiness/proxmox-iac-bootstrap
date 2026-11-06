@@ -5,7 +5,9 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: write       # publish the release
+  id-token: write       # sign the provenance attestation
+  attestations: write   # store it
 
 jobs:
   release:
@@ -19,7 +21,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           name="proxmox-iac-bootstrap-${tag}"
           mkdir -p dist "stage/${name}"
-          cp -r install.sh bootstrap README.md LICENSE "stage/${name}/"
+          cp -r install.sh bootstrap README.md README.ko.md LICENSE "stage/${name}/"
           echo "${tag}" > "stage/${name}/VERSION"
           chmod 755 "stage/${name}/install.sh" "stage/${name}/bootstrap/dsoadm" "stage/${name}"/bootstrap/*.sh
           # Same commit -> same bytes: fixed order, owner and timestamps
@@ -29,6 +31,11 @@ jobs:
           cp install.sh dist/install.sh
           (cd dist && sha256sum -- *.tar.gz install.sh > SHA256SUMS)
           cat dist/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*.tar.gz"
 
       - name: Publish release
         env:
