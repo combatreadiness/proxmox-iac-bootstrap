@@ -117,9 +117,34 @@ echo; echo "${DIM}  Download${CL}"
 TMP="$(mktemp -d)"
 cd "$TMP"
 
+# GitHub's download front door sometimes answers 504 for a few minutes, so every
+# download gets several tries with growing pauses before the installer gives up.
+TRIES=6
+try_get() {  # try_get <file> <curl args...>  -> 0 when one of the tries worked
+  local out="$1" n; shift
+  for n in $(seq 1 "$TRIES"); do
+    if curl -fsSL --proto '=https' --connect-timeout 15 --max-time 300 -o "$out" "$@" 2>/dev/null; then return 0; fi
+    if [[ $n -lt $TRIES ]]; then
+      printf '\r\e[K  %s…%s GitHub did not answer, trying again (%s/%s)' "$YW" "$CL" "$((n + 1))" "$TRIES"
+      sleep $((n * 3))
+    fi
+  done
+  return 1
+}
+
 fetch() {  # fetch <url> <file>
-  curl -fsSL --proto '=https' --retry 3 --retry-delay 2 -o "$2" "$1" \
-    || msg_err "Download failed: $1"
+  try_get "$2" "$1" || msg_err "Download failed after ${TRIES} tries: $1 (GitHub may be having trouble; try again in a few minutes)"
+}
+
+# fetch_asset <tag> <name>  -> a release file; the API path is the fallback when github.com keeps failing
+fetch_asset() {
+  local tag="$1" name="$2" api
+  if try_get "$name" "https://github.com/${PIB_REPO}/releases/download/${tag}/${name}"; then return 0; fi
+  printf '\r\e[K  %s…%s Trying the GitHub API for %s' "$YW" "$CL" "$name"
+  api=$(curl -fsSL --proto '=https' "https://api.github.com/repos/${PIB_REPO}/releases/tags/${tag}" 2>/dev/null \
+        | python3 -c 'import json,sys; print(next((a["url"] for a in json.load(sys.stdin).get("assets",[]) if a["name"]==sys.argv[1]), ""))' "$name" 2>/dev/null || true)
+  [[ -n "$api" ]] && try_get "$name" -H "Accept: application/octet-stream" "$api" && return 0
+  msg_err "Download failed: ${name} of ${tag} (GitHub may be having trouble; try again in a few minutes)"
 }
 
 if [[ -n "$PIB_SRC" ]]; then
@@ -136,10 +161,17 @@ if [[ -n "$PIB_SRC" ]]; then
 else
   msg_info "Finding release"
   if [[ "$PIB_REF" == "latest" ]]; then
-    url=$(curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' \
-          "https://github.com/${PIB_REPO}/releases/latest") \
-      || msg_err "Cannot reach GitHub to find the latest release."
-    TAG="${url##*/}"
+    TAG=""
+    for n in $(seq 1 "$TRIES"); do
+      url=$(curl -fsSLI --proto '=https' --connect-timeout 15 -o /dev/null -w '%{url_effective}' \
+            "https://github.com/${PIB_REPO}/releases/latest" 2>/dev/null) && TAG="${url##*/}" && break
+      # Same question through the API
+      TAG=$(curl -fsSL --proto '=https' "https://api.github.com/repos/${PIB_REPO}/releases/latest" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' 2>/dev/null || true)
+      [[ -n "$TAG" ]] && break
+      sleep $((n * 3))
+    done
+    [[ -n "$TAG" ]] || msg_err "Cannot reach GitHub to find the latest release. Try again in a few minutes."
     [[ "$TAG" == v* ]] || msg_err "No release found for ${PIB_REPO}. Use PIB_REF=main to install from the branch."
   else
     TAG="$PIB_REF"
@@ -148,10 +180,9 @@ else
 
   if [[ "$TAG" == v* ]]; then
     ARCHIVE="${NAME}-${TAG}.tar.gz"
-    base="https://github.com/${PIB_REPO}/releases/download/${TAG}"
     msg_info "Downloading ${ARCHIVE}"
-    fetch "${base}/${ARCHIVE}" "$ARCHIVE"
-    fetch "${base}/SHA256SUMS" SHA256SUMS
+    fetch_asset "$TAG" "$ARCHIVE"
+    fetch_asset "$TAG" SHA256SUMS
     msg_ok "Downloaded ${ARCHIVE}"
     line=$(grep -E "  ${ARCHIVE}\$" SHA256SUMS || true)
     [[ -n "$line" ]] || msg_err "${ARCHIVE} is not listed in SHA256SUMS."
